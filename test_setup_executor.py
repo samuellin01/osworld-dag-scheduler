@@ -209,6 +209,16 @@ def main():
         {
             "type": "sleep",
             "parameters": {"seconds": 2}
+        },
+        {
+            "type": "activate_window",
+            "parameters": {
+                "window_name": "test_setup.txt"
+            }
+        },
+        {
+            "type": "sleep",
+            "parameters": {"seconds": 1}
         }
     ]
 
