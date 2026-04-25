@@ -201,31 +201,14 @@ def main():
             }
         },
         {
-            "type": "open",
+            "type": "launch",
             "parameters": {
-                "path": "/tmp/test_setup.txt"
+                "command": ["gedit", "/tmp/test_setup.txt"]
             }
         },
         {
             "type": "sleep",
-            "parameters": {"seconds": 3}  # Give editor more time to open
-        },
-        {
-            "type": "command",
-            "parameters": {
-                "command": f"DISPLAY=:{display_num} wmctrl -l"  # List all windows
-            }
-        },
-        {
-            "type": "activate_window",
-            "parameters": {
-                "window_name": "gedit",
-                "required": False  # Best effort - don't fail if can't activate
-            }
-        },
-        {
-            "type": "sleep",
-            "parameters": {"seconds": 1}
+            "parameters": {"seconds": 2}
         }
     ]
 
