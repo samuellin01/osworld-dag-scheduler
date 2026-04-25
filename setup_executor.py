@@ -142,7 +142,7 @@ class SetupExecutor:
             result = self.vm_exec(cmd)
             if not result:
                 return False
-            time.sleep(2)  # Give Chrome time to start
+            time.sleep(4)  # Give Chrome time to start and load page
 
         return True
 
