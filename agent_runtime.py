@@ -106,11 +106,11 @@ class AgentRuntime:
 
         # Agent tracking
         self.agents: Dict[str, Agent] = {}
-        self._agent_lock = threading.Lock()
+        self._agent_lock = threading.RLock()  # Reentrant lock to avoid deadlock
         self._next_child_num = 0
 
         # Global message bus (for cross-agent communication)
-        self._message_lock = threading.Lock()
+        self._message_lock = threading.RLock()
 
     def initialize(self) -> bool:
         """Initialize the runtime (start display pool).
