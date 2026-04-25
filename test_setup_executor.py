@@ -208,12 +208,19 @@ def main():
         },
         {
             "type": "sleep",
-            "parameters": {"seconds": 2}
+            "parameters": {"seconds": 3}  # Give editor more time to open
+        },
+        {
+            "type": "command",
+            "parameters": {
+                "command": f"DISPLAY=:{display_num} wmctrl -l"  # List all windows
+            }
         },
         {
             "type": "activate_window",
             "parameters": {
-                "window_name": "test_setup.txt"
+                "window_name": "gedit",
+                "required": False  # Best effort - don't fail if can't activate
             }
         },
         {
@@ -224,6 +231,12 @@ def main():
 
     success = executor.execute_config(config_3)
     logger.info(f"Config 3: {'✓ SUCCESS' if success else '✗ FAILED'}")
+
+    # Check what windows are actually open
+    logger.info("Checking open windows on display...")
+    result = vm_exec(f"DISPLAY=:{display_num} wmctrl -l")
+    if result and result.get("output"):
+        logger.info(f"Open windows:\n{result['output']}")
 
     # Take screenshot
     screenshot = executor.take_screenshot()
