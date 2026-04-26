@@ -226,6 +226,7 @@ def run_fork_agent(
 
     system_prompt += (
         "Your goal is to complete tasks correctly and efficiently. "
+        "You are being evaluated on both task completion accuracy and efficiency (speed, resource usage). "
         "\n\n"
         "You can fork peer agents using fork_subtask. Each peer runs on a separate display in parallel with you. "
         "You are a worker agent that can spawn peers - continue doing work yourself rather than only delegating. "
