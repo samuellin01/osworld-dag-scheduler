@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent_runtime import AgentRuntime
 from agent_utils import (
     COMPUTER_USE_TOOL,
+    _resize_screenshot,
     parse_computer_use_actions,
 )
 from bedrock_client import BedrockClient
@@ -287,7 +288,9 @@ def run_fork_agent(
     last_tool_use_id: Optional[str] = None
     last_screenshot: Optional[bytes] = None
     final_response_text = ""
-    resize_factor = (1.0, 1.0)  # No resize - use raw 1920x1080 screenshots
+    # VM is 1920×1080, but computer-use is calibrated for 1280×720
+    # Screenshots are resized; coordinates are scaled back
+    resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)  # Scale: 1.5x
 
     start_time = time.time()
 
@@ -329,12 +332,14 @@ def run_fork_agent(
                         logger.info(f"{tag} ← Failure from {child_id}")
 
             obs_content.append({"type": "text", "text": f"Step {step}: current desktop state."})
+            # Resize screenshot from 1920×1080 to 1280×720 (computer-use calibration)
+            resized_shot = _resize_screenshot(shot)
             obs_content.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
                     "media_type": "image/png",
-                    "data": base64.b64encode(shot).decode(),
+                    "data": base64.b64encode(resized_shot).decode(),
                 },
             })
         else:
