@@ -384,7 +384,7 @@ def run_single_task(task_data, args, output_base):
         region=args.region,
         snapshot_name=ami_id,
     )
-    env.reset()
+    env.reset(task_config=task_data)
 
     vm_ip = env.vm_ip
     port = env.server_port
@@ -483,26 +483,30 @@ def run_single_task(task_data, args, output_base):
         }
     }
 
-    # Evaluate task completion
-    logger.info("Waiting 20s before evaluation...")
-    time.sleep(20)
-    score = env.evaluate()
-    logger.info(f"Benchmark score: {score:.4f}")
+    # Evaluate task completion if evaluator is configured
+    score = None
+    if hasattr(env, 'evaluator') and env.evaluator:
+        logger.info("Waiting 20s before evaluation...")
+        time.sleep(20)
+        score = env.evaluate()
+        logger.info(f"Benchmark score: {score:.4f}")
 
-    result["score"] = score
+        result["score"] = score
 
-    # Save evaluation details if available
-    if hasattr(env, 'last_eval_details') and env.last_eval_details:
-        result["eval_details"] = env.last_eval_details
-        with open(os.path.join(output_dir, "eval_details.json"), "w") as f:
-            json.dump(env.last_eval_details, f, indent=2)
+        # Save evaluation details if available
+        if hasattr(env, 'last_eval_details') and env.last_eval_details:
+            result["eval_details"] = env.last_eval_details
+            with open(os.path.join(output_dir, "eval_details.json"), "w") as f:
+                json.dump(env.last_eval_details, f, indent=2)
+
+        with open(os.path.join(output_dir, "result.txt"), "w") as f:
+            f.write(f"{score}\n")
+    else:
+        logger.info("No evaluator configured - skipping evaluation")
 
     # Save result
     with open(os.path.join(output_dir, "result.json"), "w") as f:
         json.dump(result, f, indent=2)
-
-    with open(os.path.join(output_dir, "result.txt"), "w") as f:
-        f.write(f"{score}\n")
 
     # Cleanup
     runtime.shutdown()
@@ -511,7 +515,8 @@ def run_single_task(task_data, args, output_base):
     logger.info(f"  Forked: {result['forked']} ({result['num_agents']} agents)")
     logger.info(f"  Duration: {result['duration']:.1f}s")
     logger.info(f"  Cost: ${result['token_usage']['total_cost_usd']:.4f}")
-    logger.info(f"  Score: {score:.4f}")
+    if score is not None:
+        logger.info(f"  Score: {score:.4f}")
 
     return result
 
