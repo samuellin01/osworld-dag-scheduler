@@ -84,8 +84,8 @@ def filter_to_n_most_recent_images(
 COMPUTER_USE_TOOL: Dict[str, Any] = {
     "type": "computer_20251124",
     "name": "computer",
-    "display_width_px": 1920,
-    "display_height_px": 1080,
+    "display_width_px": 1280,  # Screenshots resized to 1280×720 (calibrated resolution)
+    "display_height_px": 720,   # VM is 1920×1080, coordinates scaled by 1.5x
     "display_number": 1,
     "enable_zoom": True,  # Opus 4.7, 4.6, Sonnet 4.6, Opus 4.5: zoom into screen regions
 }
