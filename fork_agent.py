@@ -498,7 +498,6 @@ def run_fork_agent(
                     continue
 
                 # Format peek result for agent
-                import base64
                 screenshot_b64 = None
                 if peek_data.get("screenshot"):
                     screenshot_b64 = base64.b64encode(peek_data["screenshot"]).decode()
