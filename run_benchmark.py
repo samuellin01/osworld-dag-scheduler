@@ -455,8 +455,14 @@ def run_single_task(task_data, args, output_base):
 
 def main():
     parser = argparse.ArgumentParser(description="Run OSWorld benchmark")
-    parser.add_argument("--task-id", type=int, help="Run specific task by index")
-    parser.add_argument("--num-tasks", type=int, default=1, help="Number of tasks to run")
+
+    # Task selection (mutually exclusive)
+    task_group = parser.add_mutually_exclusive_group()
+    task_group.add_argument("--task-id", type=int, help="Run specific task by index (0, 1, 2, ...)")
+    task_group.add_argument("--task-name", type=str, help="Run specific task by UUID (e.g., bb5e4c0d-f964-439c-97b6-bdb9747de3f4)")
+
+    parser.add_argument("--num-tasks", type=int, default=1, help="Number of tasks to run (when not using --task-id or --task-name)")
+    parser.add_argument("--domain", type=str, default=None, help="Filter tasks by domain (e.g., chrome, gimp, multi_apps, all)")
     parser.add_argument("--task-type", default="standard", choices=["standard", "collaborative"],
                         help="Task type: standard or collaborative")
     parser.add_argument("--provider-name", default="aws", help="Provider")
@@ -476,13 +482,36 @@ def main():
 
     logger.info(f"Loaded {len(tasks)} tasks")
 
+    # Filter by domain if specified
+    if args.domain and args.domain != "all":
+        original_count = len(tasks)
+        tasks = [t for t in tasks if t.get("snapshot") == args.domain or args.domain in t.get("related_apps", [])]
+        logger.info(f"Filtered to {len(tasks)} tasks in domain '{args.domain}' (from {original_count})")
+        if not tasks:
+            logger.error(f"No tasks found for domain '{args.domain}'")
+            return
+
     # Select tasks to run
-    if args.task_id is not None:
+    if args.task_name:
+        # Find task by UUID
+        matching_tasks = [t for t in tasks if t.get("id") == args.task_name]
+        if not matching_tasks:
+            logger.error(f"Task '{args.task_name}' not found")
+            logger.info("Available task IDs:")
+            for i, t in enumerate(tasks[:10]):
+                logger.info(f"  {i}: {t.get('id')}")
+            if len(tasks) > 10:
+                logger.info(f"  ... and {len(tasks) - 10} more")
+            return
+        tasks_to_run = matching_tasks
+    elif args.task_id is not None:
+        # Find task by index
         if args.task_id >= len(tasks):
-            logger.error(f"Task {args.task_id} out of range (0-{len(tasks)-1})")
+            logger.error(f"Task index {args.task_id} out of range (0-{len(tasks)-1})")
             return
         tasks_to_run = [tasks[args.task_id]]
     else:
+        # Run first N tasks
         tasks_to_run = tasks[:args.num_tasks]
 
     # Run tasks
