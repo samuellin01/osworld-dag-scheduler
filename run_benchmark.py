@@ -56,6 +56,7 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
     new_config = []
     replacements = {}  # {placeholder: url}
     task_id = task_data.get("id", "unknown")
+    chrome_urls_to_add = []  # Collect all Chrome URLs to open in one window
 
     # First pass: create/reset sheets/docs and collect URLs
     for item in config_items:
@@ -108,10 +109,7 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
 
             # Optionally open sheet in Chrome if requested
             if params.get("open_in_chrome", False):
-                new_config.append({
-                    "type": "chrome_open_tabs",
-                    "parameters": {"urls_to_open": [sheet_url]}
-                })
+                chrome_urls_to_add.append(sheet_url)
 
         elif item.get("type") == "google_doc_from_template":
             params = item["parameters"]
@@ -140,10 +138,11 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
 
             # Optionally open doc in Chrome if requested
             if params.get("open_in_chrome", False):
-                new_config.append({
-                    "type": "chrome_open_tabs",
-                    "parameters": {"urls_to_open": [doc_url]}
-                })
+                chrome_urls_to_add.append(doc_url)
+        elif item.get("type") == "chrome_open_tabs":
+            # Merge existing Chrome URLs with our new ones
+            existing_urls = item.get("parameters", {}).get("urls_to_open", [])
+            chrome_urls_to_add.extend(existing_urls)
         else:
             # Keep other config items as-is
             new_config.append(item)
@@ -152,6 +151,13 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
     if "instruction" in task_data:
         for placeholder, url in replacements.items():
             task_data["instruction"] = task_data["instruction"].replace(placeholder, url)
+
+    # Add single chrome_open_tabs config with all URLs (opens all tabs in same window)
+    if chrome_urls_to_add:
+        new_config.append({
+            "type": "chrome_open_tabs",
+            "parameters": {"urls_to_open": chrome_urls_to_add}
+        })
 
     task_data["config"] = new_config
     return task_data
