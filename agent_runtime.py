@@ -42,6 +42,7 @@ class Agent:
     display_num: int
     subtask: str
     status: AgentStatus = AgentStatus.RUNNING
+    context_summary: Optional[str] = None
     children: Set[str] = field(default_factory=set)
     message_queue: Queue = field(default_factory=Queue)
     result: Optional[Any] = None
@@ -209,6 +210,7 @@ class AgentRuntime:
                 parent_id=parent_id,
                 display_num=display_num,
                 subtask=subtask,
+                context_summary=context_summary,
             )
             self.agents[child_id] = child
 
@@ -377,6 +379,7 @@ class AgentRuntime:
                 "display_num": agent.display_num,
                 "subtask": agent.subtask,
                 "status": agent.status.value,
+                "context_summary": agent.context_summary,
                 "children": list(agent.children),
                 "result": agent.result,
                 "duration": (
