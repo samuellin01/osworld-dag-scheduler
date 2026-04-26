@@ -239,7 +239,9 @@ def run_fork_agent(
         "\n"
         "Write subtasks as clear goals, not step-by-step instructions. Peers are autonomous and cannot see your screen.\n"
         "\n"
-        "Use peek_child to monitor peer progress. Results automatically appear in your next observation when peers complete."
+        "Use peek_child to monitor peer progress. Results automatically appear in your next observation when peers complete.\n"
+        "\n"
+        "Your child agents are capable - trust their results and use them to reduce your workload rather than re-doing their research."
     )
 
     if parent_id:
@@ -251,12 +253,8 @@ def run_fork_agent(
     system_prompt += "\n\n"
 
     system_prompt += (
-        "Google Sheets navigation tips:\n"
-        "- Arrow keys (up/down/left/right) work perfectly for cell navigation\n"
-        "- Tab moves to next cell, Enter moves down\n"
-        "- Click a cell to select it, then type to enter data\n"
-        "- Use separate key actions for each arrow press (not space-separated)\n"
-        "- Always ensure the sheet has focus (click on it first) before using keyboard navigation\n"
+        "Google Sheets: Arrow keys work for navigation. If clicks aren't selecting cells reliably, "
+        "use the Name Box (top-left, shows current cell) - click it, type cell address (e.g., 'B3'), press Enter.\n"
         "\n"
     )
 
