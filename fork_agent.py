@@ -251,6 +251,16 @@ def run_fork_agent(
     system_prompt += "\n\n"
 
     system_prompt += (
+        "Google Sheets navigation tips:\n"
+        "- Arrow keys (up/down/left/right) work perfectly for cell navigation\n"
+        "- Tab moves to next cell, Enter moves down\n"
+        "- Click a cell to select it, then type to enter data\n"
+        "- Use separate key actions for each arrow press (not space-separated)\n"
+        "- Always ensure the sheet has focus (click on it first) before using keyboard navigation\n"
+        "\n"
+    )
+
+    system_prompt += (
         "When you complete your task, output DONE followed by a summary. "
         "Output FAIL if the task is impossible."
     )
