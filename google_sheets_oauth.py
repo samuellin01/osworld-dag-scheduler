@@ -264,3 +264,76 @@ def get_sheet_id_from_url(url: str) -> str:
         raise ValueError(f"Invalid Google Workspace URL: {url}")
     doc_id = parts[1].split('/')[0]
     return doc_id
+
+
+def reset_sheet_from_template(
+    sheet_url: str,
+    template_url: str,
+    client_secret_path: str = "oauth_client_secret.json",
+    token_path: str = "oauth_token.pickle",
+) -> bool:
+    """Reset an existing Google Sheet to template state.
+
+    Replaces the entire content of an existing sheet with fresh template data.
+    The URL stays the same, permissions persist.
+
+    Args:
+        sheet_url: URL of existing Google Sheet to reset
+        template_url: URL to download .xlsx template from
+        client_secret_path: Path to OAuth client secret JSON
+        token_path: Path to save/load OAuth refresh token
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.info("[sheets-oauth] Resetting sheet to template state")
+    logger.info("[sheets-oauth]   Sheet URL: %s", sheet_url)
+    logger.info("[sheets-oauth]   Template: %s", template_url)
+
+    # Extract sheet ID from URL
+    sheet_id = get_sheet_id_from_url(sheet_url)
+
+    # Download template .xlsx
+    logger.info("[sheets-oauth] Downloading template")
+    response = requests.get(template_url, stream=True)
+    response.raise_for_status()
+
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                tmp.write(chunk)
+        tmp_path = tmp.name
+
+    try:
+        # Get OAuth credentials
+        creds = _get_oauth_credentials(client_secret_path, token_path)
+        drive_service = build('drive', 'v3', credentials=creds)
+
+        logger.info("[sheets-oauth] Replacing sheet content via Drive API")
+
+        # Replace the entire file content
+        # This preserves the file ID (and thus the URL) but replaces all content
+        with open(tmp_path, 'rb') as fh:
+            media = MediaIoBaseUpload(
+                io.BytesIO(fh.read()),
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                resumable=True
+            )
+
+            drive_service.files().update(
+                fileId=sheet_id,
+                media_body=media,
+            ).execute()
+
+        logger.info("[sheets-oauth] ✓ Sheet reset successful")
+        return True
+
+    except Exception as e:
+        logger.error(f"[sheets-oauth] Failed to reset sheet: {e}")
+        return False
+
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
