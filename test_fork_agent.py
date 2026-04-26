@@ -151,10 +151,31 @@ def main():
     logger.info("Test: Single Agent Task")
     logger.info("=" * 60)
 
-    task = "Open Google Chrome and search for 'hello world'. Take a screenshot showing the search results."
+    task = "Search for 'hello world' on Google. Take a screenshot showing the search results."
 
     # Spawn root agent
     root_id = runtime.spawn_root_agent(task=task, display_num=2)  # Use display :2 (easier than :0)
+
+    # Run setup to open Chrome to Google
+    logger.info(f"\n[{root_id}] Running setup (opening Chrome to Google)...")
+    from setup_executor import SetupExecutor
+    setup_executor = SetupExecutor(display_num=2, vm_exec=vm_exec)
+    setup_config = [
+        {
+            "type": "chrome_open_tabs",
+            "parameters": {
+                "urls_to_open": ["https://www.google.com"]
+            }
+        },
+        {
+            "type": "sleep",
+            "parameters": {"seconds": 3}
+        }
+    ]
+    setup_success = setup_executor.execute_config(setup_config)
+    if not setup_success:
+        logger.error("Setup failed!")
+        return
 
     # Run agent in main thread for this simple test
     root_output = os.path.join(args.output_dir, "root")
