@@ -16,8 +16,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent_runtime import AgentRuntime
 from agent_utils import (
     COMPUTER_USE_TOOL,
-    _resize_screenshot,
-    filter_to_n_most_recent_images,
     parse_computer_use_actions,
 )
 from bedrock_client import BedrockClient
@@ -229,24 +227,18 @@ def run_fork_agent(
     system_prompt += (
         "Your goal is to complete tasks correctly and efficiently. "
         "\n\n"
-        "You can fork subtasks to child agents using fork_subtask. Each child runs on a separate display in parallel. "
+        "You can fork peer agents using fork_subtask. Each peer runs on a separate display in parallel with you. "
+        "You are a worker agent that can spawn peers - continue doing work yourself rather than only delegating. "
         "\n"
-        "When to fork: Fork when you have independent work that can run in parallel, where each child task would take "
-        "more than 15 seconds of work. Forking has overhead (~5 seconds per child), so only fork when the time savings "
-        "justify it. Don't fork trivial tasks.\n"
+        "When to fork: Fork when you have independent work that can run in parallel. Only fork work that would take "
+        "more than 15 seconds. Forking has overhead (~5 seconds per peer).\n"
         "\n"
-        "How to write setup: The setup config prepares the child's environment before it starts. Use setup to open "
-        "applications, navigate to URLs, or prepare files. Setup is NOT instructions to the child - it actually executes "
-        "before the child begins. Common setup types: chrome_open_tabs (open URLs in Chrome), launch (start applications), "
-        "command (run shell commands). The child's display starts with setup already completed.\n"
+        "Setup config prepares the peer's environment before it starts. Use it to open applications, navigate to URLs, "
+        "or prepare files. Common types: chrome_open_tabs, launch, command. The peer starts with setup already completed.\n"
         "\n"
-        "How to write subtasks: Write a clear goal for the child, not step-by-step instructions. The child is autonomous "
-        "and cannot see your screen. If setup opens Chrome to a URL, the subtask should be 'Search for X and report results', "
-        "not 'Open Chrome and search for X'. The child starts in the state created by setup.\n"
+        "Write subtasks as clear goals, not step-by-step instructions. Peers are autonomous and cannot see your screen.\n"
         "\n"
-        "Monitoring children: Use peek_child to check a child's progress without interrupting them. You'll see their current "
-        "screenshot and full conversation history. This helps detect if a child is stuck in a loop or going down the wrong path. "
-        "When a child completes, their result will automatically appear in your next observation - you don't need to request it."
+        "Use peek_child to monitor peer progress. Results automatically appear in your next observation when peers complete."
     )
 
     if parent_id:
@@ -286,7 +278,7 @@ def run_fork_agent(
     last_tool_use_id: Optional[str] = None
     last_screenshot: Optional[bytes] = None
     final_response_text = ""
-    resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
+    resize_factor = (1.0, 1.0)  # No resize - use raw 1920x1080 screenshots
 
     start_time = time.time()
 
@@ -299,7 +291,6 @@ def run_fork_agent(
         # Take screenshot
         shot = display.screenshot()
         if shot:
-            shot = _resize_screenshot(shot)
             last_screenshot = shot
             if output_dir:
                 shot_path = os.path.join(output_dir, f"step_{step:03d}.png")
@@ -373,9 +364,6 @@ def run_fork_agent(
             last_tool_use_id = None
 
         messages.append({"role": "user", "content": obs_content})
-
-        # Filter old images to save context
-        filter_to_n_most_recent_images(messages, images_to_keep=10)
 
         # Call LLM
         content_blocks, _ = bedrock.chat(
