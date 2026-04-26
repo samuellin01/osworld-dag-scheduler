@@ -131,6 +131,7 @@ def agent_monitor_thread(
     server_port: int,
     bedrock: BedrockClient,
     model: str,
+    max_steps: int,
     output_dir: str,
 ):
     """Monitor for new agents and spawn threads to run them."""
@@ -169,6 +170,7 @@ def agent_monitor_thread(
                     server_port,
                     bedrock,
                     model,
+                    max_steps,
                     task,
                     context_summary,
                     agent_output,
@@ -197,6 +199,7 @@ def run_agent_thread(
     server_port: int,
     bedrock: BedrockClient,
     model: str,
+    max_steps: int,
     task: str,
     parent_context: Optional[str],
     output_dir: str,
@@ -212,7 +215,7 @@ def run_agent_thread(
             model=model,
             task=task,
             parent_context=parent_context,
-            max_steps=30,
+            max_steps=max_steps,
             temperature=0.7,
             output_dir=output_dir,
         )
@@ -397,7 +400,7 @@ def run_single_task(task_data, args, output_base):
     # Start monitor
     monitor = threading.Thread(
         target=agent_monitor_thread,
-        args=(runtime, vm_ip, port, bedrock, args.model, output_dir),
+        args=(runtime, vm_ip, port, bedrock, args.model, args.max_steps, output_dir),
         daemon=True,
     )
     monitor.start()
@@ -475,6 +478,7 @@ def main():
     parser.add_argument("--region", default="us-east-1", help="AWS region")
     parser.add_argument("--headless", action="store_true", help="Run headless")
     parser.add_argument("--model", default="claude-opus-4-6", help="Model name")
+    parser.add_argument("--max-steps", type=int, default=30, help="Max steps per agent (default: 30)")
     parser.add_argument("--output-dir", default="benchmark_results", help="Output dir")
     args = parser.parse_args()
 
