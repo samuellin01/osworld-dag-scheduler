@@ -87,7 +87,7 @@ COMPUTER_USE_TOOL: Dict[str, Any] = {
     "display_width_px": 1920,
     "display_height_px": 1080,
     "display_number": 1,
-    "enable_zoom": True,  # Opus 4.7: Allow zooming into screen regions for detail
+    "enable_zoom": True,  # Opus 4.7, 4.6, Sonnet 4.6, Opus 4.5: zoom into screen regions
 }
 
 
@@ -228,13 +228,25 @@ def parse_computer_use_actions(
                         "super": "command",
                         "escape": "esc",
                     }
-                    keys = text.split("+")
-                    for key in keys:
-                        k = key_conversion.get(key.strip().lower(), key.strip().lower())
-                        result += f"pyautogui.keyDown('{k}')\n"
-                    for key in reversed(keys):
-                        k = key_conversion.get(key.strip().lower(), key.strip().lower())
-                        result += f"pyautogui.keyUp('{k}')\n"
+                    # Handle key combinations (ctrl+c) vs sequences (down right right) vs single keys (enter)
+                    if "+" in text and " " not in text:
+                        # Key combination like "ctrl+c" - hold keys together
+                        keys = text.split("+")
+                        for key in keys:
+                            k = key_conversion.get(key.strip().lower(), key.strip().lower())
+                            result += f"pyautogui.keyDown('{k}')\n"
+                        for key in reversed(keys):
+                            k = key_conversion.get(key.strip().lower(), key.strip().lower())
+                            result += f"pyautogui.keyUp('{k}')\n"
+                    elif " " in text:
+                        # Space-separated sequence like "down right right" - press each separately
+                        for key in text.split():
+                            k = key_conversion.get(key.strip().lower(), key.strip().lower())
+                            result += f"pyautogui.press('{k}')\n"
+                    else:
+                        # Single key like "enter" or "down" - simple press
+                        k = key_conversion.get(text.strip().lower(), text.strip().lower())
+                        result += f"pyautogui.press('{k}')\n"
                 else:  # type
                     # Use xdotool for text input with inter-chunk sleeps
                     # to prevent character dropping in terminals.
