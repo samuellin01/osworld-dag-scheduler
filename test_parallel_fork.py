@@ -56,7 +56,7 @@ def agent_monitor_thread(
             # Skip if already running or completed
             if agent_id in running_threads:
                 continue
-            if status in (AgentStatus.DONE, AgentStatus.FAILED, AgentStatus.KILLED):
+            if status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.KILLED):
                 continue
 
             # Skip if not ready (still initializing)
@@ -104,7 +104,7 @@ def agent_monitor_thread(
 
         # Check if root is done
         root_status = runtime.get_agent_status("root")
-        if root_status and root_status["status"] in (AgentStatus.DONE, AgentStatus.FAILED):
+        if root_status and root_status["status"] in (AgentStatus.COMPLETED, AgentStatus.FAILED):
             logger.info("[Monitor] Root agent finished, stopping monitor")
             break
 
@@ -260,7 +260,7 @@ def main():
             break
 
         status = root_status["status"]
-        if status in (AgentStatus.DONE, AgentStatus.FAILED, AgentStatus.KILLED):
+        if status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.KILLED):
             logger.info(f"[Main] Root agent finished with status: {status.value}")
             break
 
