@@ -453,9 +453,9 @@ def run_single_task(task_data, args, output_base):
         if root_status["status"] in ("completed", "failed", "killed"):
             break
 
-        # Timeout after 10 minutes
-        if time.time() - start_time > 600:
-            logger.warning("Task timeout (10 min)")
+        # Timeout after 20 minutes
+        if time.time() - start_time > 1200:
+            logger.warning("Task timeout (20 min)")
             runtime.fail_agent(root_id, error="Timeout")
             break
 
