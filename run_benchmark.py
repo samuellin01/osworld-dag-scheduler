@@ -124,8 +124,15 @@ def run_agent_thread(
         runtime.fail_agent(agent_id, error=str(e))
 
 
-def load_osworld_tasks():
-    """Load OSWorld benchmark tasks from evaluation_examples."""
+def load_osworld_tasks(task_type="standard"):
+    """Load OSWorld benchmark tasks from evaluation_examples.
+
+    Args:
+        task_type: "standard" for regular tasks, "collaborative" for collaborative tasks
+    """
+    if task_type == "collaborative":
+        return load_collaborative_tasks()
+
     # Load task IDs from test file
     task_list_paths = [
         "evaluation_examples/test_small.json",  # Start with small set
@@ -163,6 +170,40 @@ def load_osworld_tasks():
             logger.warning(f"Task file not found: {task_file}")
 
     logger.info(f"Loaded {len(tasks)} task definitions")
+    return tasks
+
+
+def load_collaborative_tasks():
+    """Load collaborative tasks from evaluation_examples."""
+    config_file = "evaluation_examples/collaborative_task_configs.json"
+
+    if not os.path.exists(config_file):
+        logger.error(f"Collaborative task config not found: {config_file}")
+        return []
+
+    logger.info(f"Loading collaborative tasks from {config_file}")
+    with open(config_file) as f:
+        config_data = json.load(f)
+
+    task_metadata = config_data.get("tasks", {})
+    logger.info(f"Found {len(task_metadata)} collaborative tasks")
+
+    # Load actual task files
+    tasks = []
+    for task_id, metadata in task_metadata.items():
+        # Only load active tasks
+        if metadata.get("status") != "active":
+            continue
+
+        task_file = f"evaluation_examples/examples/collaborative/{task_id}.json"
+        if os.path.exists(task_file):
+            with open(task_file) as f:
+                task_data = json.load(f)
+                tasks.append(task_data)
+        else:
+            logger.warning(f"Task file not found: {task_file}")
+
+    logger.info(f"Loaded {len(tasks)} collaborative task definitions")
     return tasks
 
 
@@ -315,6 +356,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run OSWorld benchmark")
     parser.add_argument("--task-id", type=int, help="Run specific task by index")
     parser.add_argument("--num-tasks", type=int, default=1, help="Number of tasks to run")
+    parser.add_argument("--task-type", default="standard", choices=["standard", "collaborative"],
+                        help="Task type: standard or collaborative")
     parser.add_argument("--provider-name", default="aws", help="Provider")
     parser.add_argument("--region", default="us-east-1", help="AWS region")
     parser.add_argument("--headless", action="store_true", help="Run headless")
@@ -325,7 +368,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load tasks
-    tasks = load_osworld_tasks()
+    tasks = load_osworld_tasks(task_type=args.task_type)
     if not tasks:
         logger.error("No tasks found!")
         return
