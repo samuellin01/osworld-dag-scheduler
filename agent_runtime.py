@@ -9,7 +9,6 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
-from queue import Queue
 
 from display_pool import DisplayPool
 from setup_executor import SetupExecutor
@@ -26,15 +25,6 @@ class AgentStatus(Enum):
 
 
 @dataclass
-class Message:
-    """Message between agents."""
-    from_agent: str
-    to_agent: str
-    content: Any
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass
 class Agent:
     """Represents a running agent."""
     agent_id: str
@@ -44,7 +34,7 @@ class Agent:
     status: AgentStatus = AgentStatus.RUNNING
     context_summary: Optional[str] = None
     children: Set[str] = field(default_factory=set)
-    message_queue: Queue = field(default_factory=Queue)
+    pending_child_results: List[Dict[str, Any]] = field(default_factory=list)
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     result: Optional[Any] = None
     start_time: float = field(default_factory=time.time)
@@ -225,65 +215,6 @@ class AgentRuntime:
 
         return child_id
 
-    def send_message(self, from_agent: str, to_agent: str, content: Any):
-        """Send a message from one agent to another.
-
-        Only parent-child communication is allowed.
-
-        Args:
-            from_agent: Sender agent ID
-            to_agent: Recipient agent ID
-            content: Message content (any JSON-serializable data)
-        """
-        with self._agent_lock:
-            sender = self.agents.get(from_agent)
-            recipient = self.agents.get(to_agent)
-
-            if not sender or not recipient:
-                logger.error(f"Cannot send message: invalid agent IDs")
-                return
-
-            # Verify parent-child relationship
-            is_parent_to_child = recipient.parent_id == from_agent
-            is_child_to_parent = sender.parent_id == to_agent
-
-            if not (is_parent_to_child or is_child_to_parent):
-                logger.error(
-                    f"Cannot send message: {from_agent} and {to_agent} "
-                    f"are not parent-child"
-                )
-                return
-
-            # Queue message
-            msg = Message(from_agent=from_agent, to_agent=to_agent, content=content)
-            recipient.message_queue.put(msg)
-
-            logger.info(f"Message: {from_agent} → {to_agent}")
-
-    def receive_message(self, agent_id: str, timeout: float = 0) -> Optional[Message]:
-        """Receive a message for an agent (non-blocking by default).
-
-        Args:
-            agent_id: Agent ID to receive message for
-            timeout: Seconds to wait for message (0 = non-blocking)
-
-        Returns:
-            Message if available, None otherwise
-        """
-        with self._agent_lock:
-            agent = self.agents.get(agent_id)
-            if not agent:
-                logger.error(f"Cannot receive message: agent {agent_id} not found")
-                return None
-
-        try:
-            # Get message from queue (non-blocking by default)
-            msg = agent.message_queue.get(timeout=timeout) if timeout > 0 else agent.message_queue.get_nowait()
-            logger.info(f"Received: {msg.from_agent} → {agent_id}")
-            return msg
-        except:
-            return None
-
     def complete_agent(self, agent_id: str, result: Any):
         """Mark an agent as completed with a result.
 
@@ -300,6 +231,17 @@ class AgentRuntime:
             agent.status = AgentStatus.COMPLETED
             agent.result = result
             agent.end_time = time.time()
+
+            # Inject result into parent's pending results
+            if agent.parent_id:
+                parent = self.agents.get(agent.parent_id)
+                if parent:
+                    parent.pending_child_results.append({
+                        "child_id": agent_id,
+                        "status": "completed",
+                        "result": result,
+                    })
+                    logger.info(f"📬 Result from {agent_id} queued for {agent.parent_id}")
 
             # Release display back to pool
             if agent.display_num > 0:  # Don't release display :0 (primary)
@@ -324,6 +266,17 @@ class AgentRuntime:
             agent.status = AgentStatus.FAILED
             agent.result = {"error": error}
             agent.end_time = time.time()
+
+            # Inject failure into parent's pending results
+            if agent.parent_id:
+                parent = self.agents.get(agent.parent_id)
+                if parent:
+                    parent.pending_child_results.append({
+                        "child_id": agent_id,
+                        "status": "failed",
+                        "error": error,
+                    })
+                    logger.info(f"📬 Failure from {agent_id} queued for {agent.parent_id}")
 
             # Release display
             if agent.display_num > 0:
@@ -419,6 +372,24 @@ class AgentRuntime:
             agent = self.agents.get(agent_id)
             if agent:
                 agent.conversation_history.append(entry)
+
+    def get_pending_child_results(self, agent_id: str) -> List[Dict[str, Any]]:
+        """Get and clear pending child results for an agent.
+
+        Args:
+            agent_id: Agent ID
+
+        Returns:
+            List of pending child results (and clears the list)
+        """
+        with self._agent_lock:
+            agent = self.agents.get(agent_id)
+            if not agent:
+                return []
+
+            results = agent.pending_child_results.copy()
+            agent.pending_child_results.clear()
+            return results
 
     def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get status of an agent.
