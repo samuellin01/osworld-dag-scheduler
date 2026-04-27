@@ -143,6 +143,13 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
             # Merge existing Chrome URLs with our new ones
             existing_urls = item.get("parameters", {}).get("urls_to_open", [])
             chrome_urls_to_add.extend(existing_urls)
+        elif item.get("type") == "launch":
+            # Skip redundant Chrome launches - chrome_open_tabs handles it
+            command = item.get("parameters", {}).get("command", [])
+            if isinstance(command, list) and len(command) > 0 and "chrome" in command[0].lower():
+                logger.info("[setup] Skipping redundant Chrome launch (chrome_open_tabs will handle it)")
+                continue
+            new_config.append(item)
         else:
             # Keep other config items as-is
             new_config.append(item)
