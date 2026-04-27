@@ -242,7 +242,9 @@ def run_fork_agent(
         "\n"
         "Use peek_child to monitor peer progress. Results automatically appear in your next observation when peers complete.\n"
         "\n"
-        "Your child agents are capable - trust their results and use them to reduce your workload rather than re-doing their research."
+        "Your child agents are capable - trust their results and use them to reduce your workload rather than re-doing their research.\n"
+        "\n"
+        "Before outputting DONE, remind yourself what the original task was and check you've actually completed it."
     )
 
     if parent_id:
