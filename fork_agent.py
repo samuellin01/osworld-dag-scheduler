@@ -229,28 +229,37 @@ def run_fork_agent(
         "Your goal is to complete tasks correctly and efficiently. "
         "You are being evaluated on both task completion accuracy and efficiency (speed, resource usage). "
         "\n\n"
-        "You can fork peer agents using fork_subtask. Each peer runs on a separate display in parallel with you. "
-        "You are a worker agent that can spawn peers - continue doing work yourself rather than only delegating. "
-        "\n"
-        "When to fork: Fork when you have independent work that can run in parallel. Only fork work that would take "
-        "more than 15 seconds. Forking has overhead (~5 seconds per peer).\n"
-        "\n"
-        "Setup config prepares the peer's environment before it starts. Use it to open applications, navigate to URLs, "
-        "or prepare files. Common types: chrome_open_tabs, launch, command. The peer starts with setup already completed.\n"
-        "\n"
-        "Write subtasks as clear goals, not step-by-step instructions. Peers are autonomous and cannot see your screen.\n"
-        "\n"
-        "Use peek_child to monitor peer progress. Results automatically appear in your next observation when peers complete.\n"
-        "\n"
-        "Your child agents are capable - trust their results and use them to reduce your workload rather than re-doing their research.\n"
-        "\n"
-        "Before outputting DONE, remind yourself what the original task was and check you've actually completed it."
     )
 
     if parent_id:
+        # Child agent: worker only, cannot fork
         system_prompt += (
-            "\n\nYou are a child agent working on a specific subtask. Your display has been prepared via setup config. "
-            "When done, just output DONE with your result. Your parent will automatically receive it."
+            "You are a worker agent assigned a specific subtask. Your display has been prepared via setup config. "
+            "Focus on completing your subtask efficiently. When done, output DONE with your result. "
+            "Your parent will automatically receive it.\n"
+            "\n"
+            "Before outputting DONE, remind yourself what your subtask was and check you've actually completed it."
+        )
+    else:
+        # Root agent: can fork workers
+        system_prompt += (
+            "You can fork worker agents using fork_subtask to parallelize independent work. "
+            "Each worker runs on a separate display. Continue doing work yourself rather than only delegating.\n"
+            "\n"
+            "When to fork: Fork when you have independent work that can run in parallel. Only fork work that would take "
+            "more than 15 seconds. Forking has overhead (~5 seconds per worker).\n"
+            "\n"
+            "Setup config prepares the worker's environment before it starts. Use it to open applications, navigate to URLs, "
+            "or prepare files. Common types: chrome_open_tabs, launch, command. The worker starts with setup already completed.\n"
+            "\n"
+            "Write subtasks as clear goals, not step-by-step instructions. Workers are autonomous and cannot see your screen.\n"
+            "\n"
+            "Use peek_child to monitor worker progress. Results automatically appear in your next observation when workers complete.\n"
+            "\n"
+            "Your workers are capable - trust their results and use them to reduce your workload rather than re-doing their research.\n"
+            "\n"
+            "Before outputting DONE, remind yourself what the original task was and check you've actually completed it. "
+            "If you forked workers to collect data you need for your final answer, make sure you've received their complete results."
         )
 
     system_prompt += "\n\n"
@@ -272,12 +281,18 @@ def run_fork_agent(
     )
 
     # Tools available to this agent
-    tools = [
-        COMPUTER_USE_TOOL,
-        FORK_TOOL,
-        KILL_CHILD_TOOL,
-        PEEK_CHILD_TOOL,
-    ]
+    # Root gets all tools (forking, monitoring), children only get computer use
+    if parent_id:
+        # Child agent: worker tools only
+        tools = [COMPUTER_USE_TOOL]
+    else:
+        # Root agent: orchestration + worker tools
+        tools = [
+            COMPUTER_USE_TOOL,
+            FORK_TOOL,
+            KILL_CHILD_TOOL,
+            PEEK_CHILD_TOOL,
+        ]
 
     # Build initial message
     if parent_context:
