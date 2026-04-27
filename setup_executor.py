@@ -142,6 +142,7 @@ class SetupExecutor:
                 f"--no-first-run "
                 f"--no-default-browser-check "
                 f"--disable-default-apps "
+                f"--start-maximized "
                 f"{url_args} "
                 f">/dev/null 2>&1 &"
             )
