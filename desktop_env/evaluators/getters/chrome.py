@@ -2947,3 +2947,32 @@ def get_google_doc(env, config: Dict[str, Any]) -> str:
                 f.write(chunk)
 
     return _path
+
+def get_google_slide(env, config: Dict[str, Any]) -> str:
+    """Download Google Slides as pptx file.
+
+    Config:
+        slide_id (str): Google Slides document ID
+        dest (str): filename to save as in cache directory
+
+    Returns:
+        str: local path to downloaded pptx file
+    """
+    slide_id = config["slide_id"]
+    dest = config["dest"]
+    _path = os.path.join(env.cache_dir, dest)
+
+    if os.path.exists(_path):
+        return _path
+
+    url = f"https://docs.google.com/presentation/d/{slide_id}/export/pptx"
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+
+    os.makedirs(env.cache_dir, exist_ok=True)
+    with open(_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+    return _path
