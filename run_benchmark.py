@@ -117,7 +117,13 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
             # Update evaluator
             if "evaluator" in task_data and "result" in task_data["evaluator"]:
                 result_config = task_data["evaluator"]["result"]
-                if result_config.get("type") == "google_sheet":
+                # Handle both single dict and list of dicts
+                if isinstance(result_config, list):
+                    for config in result_config:
+                        if config.get("type") == "google_sheet":
+                            sheet_id = get_sheet_id_from_url(sheet_url)
+                            config["sheet_id"] = sheet_id
+                elif result_config.get("type") == "google_sheet":
                     sheet_id = get_sheet_id_from_url(sheet_url)
                     result_config["sheet_id"] = sheet_id
 
@@ -168,7 +174,13 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
             # Update evaluator
             if "evaluator" in task_data and "result" in task_data["evaluator"]:
                 result_config = task_data["evaluator"]["result"]
-                if result_config.get("type") == "google_doc":
+                # Handle both single dict and list of dicts
+                if isinstance(result_config, list):
+                    for config in result_config:
+                        if config.get("type") == "google_doc":
+                            doc_id = get_sheet_id_from_url(doc_url)
+                            config["doc_id"] = doc_id
+                elif result_config.get("type") == "google_doc":
                     doc_id = get_sheet_id_from_url(doc_url)
                     result_config["doc_id"] = doc_id
 
@@ -219,7 +231,13 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
             # Update evaluator
             if "evaluator" in task_data and "result" in task_data["evaluator"]:
                 result_config = task_data["evaluator"]["result"]
-                if result_config.get("type") == "google_slide":
+                # Handle both single dict and list of dicts
+                if isinstance(result_config, list):
+                    for config in result_config:
+                        if config.get("type") == "google_slide":
+                            slide_id = get_sheet_id_from_url(slide_url)
+                            config["slide_id"] = slide_id
+                elif result_config.get("type") == "google_slide":
                     slide_id = get_sheet_id_from_url(slide_url)
                     result_config["slide_id"] = slide_id
 
