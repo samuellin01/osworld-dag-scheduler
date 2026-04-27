@@ -304,8 +304,12 @@ def run_fork_agent(
         "\n"
         "Google Sheets: Arrow keys work for navigation. If clicks aren't selecting cells reliably, "
         "use the Name Box (top-left, shows current cell) - click it, type cell address (e.g., 'B3'), press Enter. "
-        "Batch actions together - if you can fill multiple cells in one operation, do so instead of one action per cell. "
-        "You can also parallelize work by forking workers for independent regions (e.g., different columns or sheets).\n"
+        "Batch actions together - if you can fill multiple cells in one operation, do so instead of one action per cell.\n"
+        "\n"
+        "**Parallelization is cheap for Google Sheets**: Opening the same sheet URL in a new display costs only 1 action. "
+        "If you have 3+ actions to take on a sheet, parallelize from the beginning by forking workers for independent "
+        "regions (different columns, rows, or sheets). Don't do work sequentially if it can be divided - the setup cost "
+        "is so low that even small workloads benefit from parallelization.\n"
         "\n"
     )
 
