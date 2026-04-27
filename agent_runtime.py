@@ -35,6 +35,7 @@ class Agent:
     context_summary: Optional[str] = None
     children: Set[str] = field(default_factory=set)
     pending_child_results: List[Dict[str, Any]] = field(default_factory=list)
+    pending_messages: List[str] = field(default_factory=list)
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     result: Optional[Any] = None
     start_time: float = field(default_factory=time.time)
@@ -361,6 +362,58 @@ class AgentRuntime:
             logger.info(f"👀 {parent_id} peeking at {child_id} (step {len(child.conversation_history)})")
             return result
 
+    def message_child(self, parent_id: str, child_id: str, message: str) -> bool:
+        """Send a message to child agent(s) from parent.
+
+        The message will be injected into the child's next observation as guidance
+        from the coordinator. Use this to provide hints, clarifications, or share
+        discoveries between workers.
+
+        Args:
+            parent_id: ID of parent agent sending the message
+            child_id: ID of child agent to message, or 'all' to broadcast
+            message: The message content to send
+
+        Returns:
+            True if message sent successfully, False otherwise
+        """
+        with self._agent_lock:
+            parent = self.agents.get(parent_id)
+            if not parent:
+                logger.error(f"Cannot message: parent {parent_id} not found")
+                return False
+
+            if child_id == "all":
+                # Broadcast to all active children
+                success_count = 0
+                for c_id in parent.children:
+                    child = self.agents.get(c_id)
+                    if child and child.status == AgentStatus.RUNNING:
+                        child.pending_messages.append(message)
+                        success_count += 1
+
+                if success_count > 0:
+                    logger.info(f"📢 {parent_id} broadcast to {success_count} children: {message[:80]}...")
+                    return True
+                else:
+                    logger.warning(f"📢 {parent_id} has no active children to broadcast to")
+                    return False
+            else:
+                # Message specific child
+                child = self.agents.get(child_id)
+                if not child:
+                    logger.error(f"Cannot message: child {child_id} not found")
+                    return False
+
+                # Only parent can message child
+                if child.parent_id != parent_id:
+                    logger.error(f"Cannot message: {parent_id} is not parent of {child_id}")
+                    return False
+
+                child.pending_messages.append(message)
+                logger.info(f"📬 {parent_id} → {child_id}: {message[:80]}...")
+                return True
+
     def update_conversation(self, agent_id: str, entry: Dict[str, Any]):
         """Add an entry to agent's conversation history.
 
@@ -390,6 +443,24 @@ class AgentRuntime:
             results = agent.pending_child_results.copy()
             agent.pending_child_results.clear()
             return results
+
+    def get_pending_messages(self, agent_id: str) -> List[str]:
+        """Get and clear pending messages for an agent.
+
+        Args:
+            agent_id: Agent ID
+
+        Returns:
+            List of pending messages (and clears the list)
+        """
+        with self._agent_lock:
+            agent = self.agents.get(agent_id)
+            if not agent:
+                return []
+
+            messages = agent.pending_messages.copy()
+            agent.pending_messages.clear()
+            return messages
 
     def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get status of an agent.
