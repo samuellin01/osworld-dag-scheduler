@@ -19,9 +19,11 @@ from googleapiclient.http import MediaIoBaseUpload
 
 logger = logging.getLogger(__name__)
 
-# Scopes needed for creating sheets and setting permissions
+# Scopes needed for creating sheets/docs/slides and setting permissions
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/documents',
+    'https://www.googleapis.com/auth/presentations',
     'https://www.googleapis.com/auth/drive.file'
 ]
 
@@ -332,6 +334,92 @@ def reset_sheet_from_template(
     except Exception as e:
         logger.error(f"[sheets-oauth] Failed to reset sheet: {e}")
         return False
+
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+def create_slide_from_template_oauth(
+    template_url: str,
+    client_secret_path: str = "oauth_client_secret.json",
+    token_path: str = "oauth_token.pickle",
+    title: str = "OSWorld Collaborative Task Slides"
+) -> str:
+    """Create a new Google Slides from a .pptx template using OAuth.
+
+    Args:
+        template_url: URL to download .pptx template from (e.g., HuggingFace)
+        client_secret_path: Path to OAuth client secret JSON
+        token_path: Path to save/load OAuth refresh token
+        title: Title for the new Google Slides
+
+    Returns:
+        Shareable Google Slides URL (anyone with link can edit)
+    """
+    logger.info("[slides-oauth] Downloading template from %s", template_url)
+
+    # Download template .pptx
+    response = requests.get(template_url, stream=True)
+    response.raise_for_status()
+
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                tmp.write(chunk)
+        tmp_path = tmp.name
+
+    try:
+        # Get OAuth credentials
+        creds = _get_oauth_credentials(client_secret_path, token_path)
+        drive_service = build('drive', 'v3', credentials=creds)
+
+        logger.info("[slides-oauth] Uploading to Google Slides as '%s'", title)
+
+        # Upload .pptx file and convert to Google Slides format
+        file_metadata = {
+            'name': title,
+            'mimeType': 'application/vnd.google-apps.presentation'
+        }
+
+        # Read and upload the file
+        media = MediaIoBaseUpload(
+            open(tmp_path, 'rb'),
+            mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            resumable=True
+        )
+
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink'
+        ).execute()
+
+        slide_id = file.get('id')
+        logger.info("[slides-oauth] ✓ Slides created: %s", slide_id)
+
+        # Set permissions: anyone with link can edit
+        permission = {
+            'type': 'anyone',
+            'role': 'writer'
+        }
+        drive_service.permissions().create(
+            fileId=slide_id,
+            body=permission
+        ).execute()
+
+        logger.info("[slides-oauth] ✓ Permissions set to 'anyone can edit'")
+
+        # Get shareable link
+        file_meta = drive_service.files().get(
+            fileId=slide_id,
+            fields='webViewLink'
+        ).execute()
+
+        url = file_meta.get('webViewLink')
+        logger.info("[slides-oauth] ✓ Shareable URL: %s", url)
+
+        return url
 
     finally:
         # Clean up temp file
