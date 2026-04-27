@@ -288,8 +288,7 @@ def run_fork_agent(
             "\n"
             "Your workers are capable - trust their results and use them to reduce your workload rather than re-doing their research.\n"
             "\n"
-            "Before outputting DONE, remind yourself what the original task was and check you've actually completed it. "
-            "If you forked workers to collect data you need for your final answer, make sure you've received their complete results."
+            "Before outputting DONE, confirm you received results from all workers and the original task requirements are met based on their reports."
         )
 
     system_prompt += "\n\n"
