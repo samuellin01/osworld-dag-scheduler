@@ -431,13 +431,8 @@ def run_single_task(task_data, args, output_base):
     # Initialize Bedrock
     bedrock = BedrockClient(region=args.region, log_dir=output_dir)
 
-    # Run initial setup config
-    if config:
-        from setup_executor import SetupExecutor
-        setup_executor = SetupExecutor(display_num=0, vm_exec=vm_exec)
-        logger.info(f"Running {len(config)} setup steps...")
-        setup_executor.execute_config(config)
-        time.sleep(2)
+    # Setup already ran via env.reset(task_config=task_data) above
+    # No need to execute config again
 
     # Spawn root agent
     root_id = runtime.spawn_root_agent(task=instruction, display_num=0)
