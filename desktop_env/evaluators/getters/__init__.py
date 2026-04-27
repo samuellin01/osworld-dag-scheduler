@@ -17,6 +17,7 @@ from .chrome import (
     get_googledrive_file,
     get_google_sheet,
     get_google_doc,
+    get_google_slide,
     get_active_tab_info,
     get_enable_do_not_track,
     get_enable_enhanced_safety_browsing,
