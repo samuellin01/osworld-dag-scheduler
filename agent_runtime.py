@@ -237,12 +237,19 @@ class AgentRuntime:
             if agent.parent_id:
                 parent = self.agents.get(agent.parent_id)
                 if parent:
+                    # Capture final screenshot as visual evidence
+                    screenshot = None
+                    if agent.display_num > 0:
+                        executor = SetupExecutor(display_num=agent.display_num, vm_exec=self.vm_exec)
+                        screenshot = executor.take_screenshot()
+
                     parent.pending_child_results.append({
                         "child_id": agent_id,
                         "status": "completed",
                         "result": result,
+                        "screenshot": screenshot,  # Visual evidence of completion
                     })
-                    logger.info(f"📬 Result from {agent_id} queued for {agent.parent_id}")
+                    logger.info(f"📬 Result from {agent_id} queued for {agent.parent_id} (with screenshot)")
 
             # Release display back to pool
             if agent.display_num > 0:  # Don't release display :0 (primary)
