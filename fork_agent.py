@@ -253,6 +253,7 @@ def run_fork_agent(
     system_prompt += (
         "Your goal is to complete tasks correctly and efficiently. "
         "You are being evaluated on both task completion accuracy and efficiency (speed, resource usage). "
+        "If you manually redo work that workers have already completed, you lose the efficiency benefit of parallel execution. "
         "\n\n"
     )
 
