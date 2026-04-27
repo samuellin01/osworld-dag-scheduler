@@ -378,7 +378,20 @@ def run_fork_agent(
                             "type": "text",
                             "text": f"Child {child_id} completed:\n{summary}"
                         })
-                        logger.info(f"{tag} ← Result from {child_id}")
+                        # Include visual evidence of completion
+                        screenshot = child_result.get("screenshot")
+                        if screenshot:
+                            obs_content.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": base64.b64encode(screenshot).decode(),
+                                },
+                            })
+                            logger.info(f"{tag} ← Result from {child_id} (with screenshot)")
+                        else:
+                            logger.info(f"{tag} ← Result from {child_id}")
                     elif child_result.get("status") == "failed":
                         error = child_result.get("error", "unknown error")
                         obs_content.append({
@@ -422,7 +435,20 @@ def run_fork_agent(
                             "type": "text",
                             "text": f"Child {child_id} completed:\n{summary}"
                         })
-                        logger.info(f"{tag} ← Result from {child_id}")
+                        # Include visual evidence of completion
+                        screenshot = child_result.get("screenshot")
+                        if screenshot:
+                            obs_content.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": base64.b64encode(screenshot).decode(),
+                                },
+                            })
+                            logger.info(f"{tag} ← Result from {child_id} (with screenshot)")
+                        else:
+                            logger.info(f"{tag} ← Result from {child_id}")
                     elif child_result.get("status") == "failed":
                         error = child_result.get("error", "unknown error")
                         obs_content.append({
