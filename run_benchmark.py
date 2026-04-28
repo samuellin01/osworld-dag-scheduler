@@ -345,6 +345,13 @@ def agent_monitor_thread(
             task = agent_info.get("subtask", "")
             context_summary = agent_info.get("context_summary")
 
+            # Create dedicated bedrock client for this agent with its own log dir
+            agent_bedrock = BedrockClient(
+                region=args.region,
+                log_dir=agent_output,
+                agent_id=agent_id
+            )
+
             thread = threading.Thread(
                 target=run_agent_thread,
                 args=(
@@ -352,7 +359,7 @@ def agent_monitor_thread(
                     runtime,
                     vm_ip,
                     server_port,
-                    bedrock,
+                    agent_bedrock,  # Use agent-specific client
                     model,
                     max_steps,
                     task,
