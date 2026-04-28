@@ -966,18 +966,10 @@ def main() -> None:
             trial_score = None
             trial_duration = None
             trial_instruction = None
+            trial_error = None
 
             if not args.dry_run and os.path.isdir(trial_output_dir):
-                # Read score from result.txt
-                result_txt = os.path.join(trial_output_dir, "result.txt")
-                if os.path.isfile(result_txt):
-                    try:
-                        with open(result_txt) as fh:
-                            trial_score = float(fh.read().strip())
-                    except (ValueError, OSError):
-                        pass
-
-                # Read result.json for duration and instruction
+                # Read result.json first to check for errors
                 result_json = os.path.join(trial_output_dir, "result.json")
                 if os.path.isfile(result_json):
                     try:
@@ -985,8 +977,42 @@ def main() -> None:
                             result_data = json.load(fh)
                             trial_duration = result_data.get("duration")
                             trial_instruction = result_data.get("instruction")
+
+                            # Check if agent failed
+                            if result_data.get("status") == "failed":
+                                agent_result = result_data.get("result", {})
+                                if isinstance(agent_result, dict) and "error" in agent_result:
+                                    error_msg = agent_result["error"]
+
+                                    # Detect conversation history corruption bug
+                                    if "tool_use" in error_msg and "tool_result" in error_msg:
+                                        trial_error = "tool_result_missing"
+                                        logger.error(
+                                            "Task %s trial %d: Conversation history corruption detected: %s",
+                                            task_id, trial_idx, error_msg
+                                        )
+                                        # Write error.txt for visibility
+                                        error_txt = os.path.join(trial_output_dir, "error.txt")
+                                        with open(error_txt, "w") as fh:
+                                            fh.write(f"ERROR: {trial_error}\n{error_msg}\n")
+                                    else:
+                                        trial_error = "agent_failed"
+                                        logger.error(
+                                            "Task %s trial %d: Agent failed: %s",
+                                            task_id, trial_idx, error_msg
+                                        )
                     except (json.JSONDecodeError, OSError):
                         pass
+
+                # Read score from result.txt only if no error
+                if trial_error is None:
+                    result_txt = os.path.join(trial_output_dir, "result.txt")
+                    if os.path.isfile(result_txt):
+                        try:
+                            with open(result_txt) as fh:
+                                trial_score = float(fh.read().strip())
+                        except (ValueError, OSError):
+                            pass
 
                 # Create task.txt if instruction available
                 if trial_instruction:
@@ -1008,7 +1034,7 @@ def main() -> None:
 
             results[task_id]["trials"].append({
                 "trial": trial_idx, "run": run_ok, "score": trial_score,
-                "duration": trial_duration,
+                "duration": trial_duration, "error": trial_error,
             })
 
             if not run_ok:
@@ -1051,8 +1077,11 @@ def main() -> None:
                     trial=trial_idx,
                 )
 
-            score_str = f" score={trial_score}" if trial_score is not None else ""
-            logger.info("Task %s trial %d COMPLETED.%s", task_id, trial_idx, score_str)
+            if trial_error:
+                logger.warning("Task %s trial %d ERROR: %s", task_id, trial_idx, trial_error)
+            else:
+                score_str = f" score={trial_score}" if trial_score is not None else ""
+                logger.info("Task %s trial %d COMPLETED.%s", task_id, trial_idx, score_str)
 
     # Summary
     logger.info("=" * 60)
@@ -1062,8 +1091,11 @@ def main() -> None:
     run_success = [t for t, v in results.items() if any(trial["run"] for trial in v["trials"])]
     run_failed = [t for t, v in results.items() if v["trials"] and not any(trial["run"] for trial in v["trials"])]
     all_scores = []
-    for v in results.values():
+    error_trials = []
+    for task_id, v in results.items():
         for trial in v["trials"]:
+            if trial.get("error"):
+                error_trials.append((task_id, trial["trial"], trial["error"]))
             if trial["score"] is not None:
                 all_scores.append(trial["score"])
 
@@ -1075,6 +1107,11 @@ def main() -> None:
         len(run_failed),
         len(results),
     )
+
+    if error_trials:
+        logger.warning("Trials with errors: %d", len(error_trials))
+        for task_id, trial_num, error_type in error_trials:
+            logger.warning("  - %s trial_%d: %s", task_id, trial_num, error_type)
 
     if all_scores:
         avg_score = sum(all_scores) / len(all_scores)
