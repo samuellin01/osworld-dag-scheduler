@@ -435,9 +435,6 @@ def generate_trajectory_html(
             if response_file.is_file():
                 try:
                     thinking = response_file.read_text(encoding='utf-8', errors='replace').strip()
-                    # Limit thinking to first 500 chars for display
-                    if len(thinking) > 500:
-                        thinking = thinking[:500] + "..."
                 except OSError:
                     pass
 
