@@ -165,11 +165,6 @@ summary:hover {{ background: #1c2128; }}
 
     # Agents — flat list, each collapsible
     for agent_id, agent_dir in agent_dirs:
-        # Read agent log if available
-        log_path = agent_dir / "agent.log"
-        if not log_path.is_file():
-            continue
-
         # Discover step screenshots
         step_files: Dict[int, pathlib.Path] = {}
         for f in sorted(agent_dir.iterdir()):
