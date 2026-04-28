@@ -39,6 +39,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+# Import trajectory generator
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPT_DIR)
+from trajectory_generator import generate_trajectory_html
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -1009,6 +1014,21 @@ def main() -> None:
             if not run_ok:
                 logger.warning("Task %s trial %d FAILED — skipping upload.", task_id, trial_idx)
                 continue
+
+            # Generate trajectory HTML visualization
+            if not args.dry_run and os.path.isdir(trial_output_dir):
+                try:
+                    generate_trajectory_html(
+                        local_dir=trial_output_dir,
+                        task_id=task_id,
+                        github_repo=args.github_results_repo,
+                        github_path=args.github_results_path,
+                        task_type=args.task_type,
+                        config_name=args.config_name,
+                        trial=trial_idx,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to generate trajectory HTML: %s", exc)
 
             # Upload results to GitHub
             if not args.skip_github_upload:
