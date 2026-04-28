@@ -659,6 +659,21 @@ h2 {{
 .timeline-play-button:active {{
     transform: scale(0.95);
 }}
+.timeline-speed-selector {{
+    background: #161b22;
+    border: 1px solid #30363d;
+    color: #e6edf3;
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    transition: all 0.2s ease;
+}}
+.timeline-speed-selector:hover {{
+    background: #21262d;
+    border-color: #58a6ff;
+}}
 .timeline-time {{
     font-size: 1.4em;
     background: linear-gradient(90deg, #58a6ff 0%, #79c0ff 100%);
@@ -1044,6 +1059,13 @@ h2 {{
     h.append("  <div class='timeline-header'>")
     h.append("    <div class='timeline-controls'>")
     h.append("      <button class='timeline-play-button' id='timeline-play-button' title='Play/Pause'>▶️</button>")
+    h.append("      <select class='timeline-speed-selector' id='timeline-speed-selector' title='Playback Speed'>")
+    h.append("        <option value='1'>1x</option>")
+    h.append("        <option value='2'>2x</option>")
+    h.append("        <option value='4' selected>4x</option>")
+    h.append("        <option value='8'>8x</option>")
+    h.append("        <option value='16'>16x</option>")
+    h.append("      </select>")
     h.append("      <div class='timeline-time' id='timeline-time'>0:00</div>")
     h.append("    </div>")
     h.append(f"    <div style='color:#8b949e;font-size:0.85em'>Total: {fmt_duration(total_duration)}</div>")
@@ -1178,6 +1200,7 @@ let isDragging = false;
 let isPlaying = false;
 let animationId = null;
 let lastFrameTime = null;
+let playbackSpeed = 4; // Default 4x speed
 
 function updateDisplays(time) {
     currentTime = time;
@@ -1260,7 +1283,7 @@ function animate(timestamp) {
     const deltaTime = (timestamp - lastFrameTime) / 1000; // Convert to seconds
     lastFrameTime = timestamp;
 
-    const newTime = currentTime + deltaTime;
+    const newTime = currentTime + (deltaTime * playbackSpeed);
 
     if (newTime >= totalDuration) {
         // Reached end, stop playing
@@ -1297,6 +1320,11 @@ function togglePlay() {
 }
 
 document.getElementById('timeline-play-button').addEventListener('click', togglePlay);
+
+// Speed selector
+document.getElementById('timeline-speed-selector').addEventListener('change', (e) => {
+    playbackSpeed = parseFloat(e.target.value);
+});
 
 // Click on slider
 slider.addEventListener('click', (e) => {
