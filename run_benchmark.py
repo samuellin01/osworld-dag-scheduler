@@ -317,6 +317,7 @@ def agent_monitor_thread(
     model: str,
     max_steps: int,
     output_dir: str,
+    region: str,
 ):
     """Monitor for new agents and spawn threads to run them."""
     running_threads = {}
@@ -347,7 +348,7 @@ def agent_monitor_thread(
 
             # Create dedicated bedrock client for this agent with its own log dir
             agent_bedrock = BedrockClient(
-                region=args.region,
+                region=region,
                 log_dir=agent_output,
                 agent_id=agent_id
             )
@@ -586,7 +587,7 @@ def run_single_task(task_data, args, output_base):
     # Start monitor
     monitor = threading.Thread(
         target=agent_monitor_thread,
-        args=(runtime, vm_ip, port, bedrock, args.model, args.max_steps, output_dir),
+        args=(runtime, vm_ip, port, bedrock, args.model, args.max_steps, output_dir, args.region),
         daemon=True,
     )
     monitor.start()
