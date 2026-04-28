@@ -704,6 +704,28 @@ def run_fork_agent(
                     display.run_action(action_code)
                     time.sleep(1)
 
+                    # Save action for trajectory visualization
+                    if output_dir:
+                        action_file = os.path.join(output_dir, f"step_{step:03d}_action.txt")
+                        with open(action_file, "w") as f:
+                            # Convert action code to human-readable format
+                            action_input = tool_input
+                            action_type = action_input.get('action', '')
+                            if action_type == 'type':
+                                f.write(f"Type: {action_input.get('text', '')}")
+                            elif action_type == 'key':
+                                f.write(f"Key: {action_input.get('text', '')}")
+                            elif action_type in ['left_click', 'right_click', 'middle_click', 'double_click']:
+                                coord = action_input.get('coordinate', [])
+                                f.write(f"{action_type.replace('_', ' ').title()} at {coord}")
+                            elif action_type == 'mouse_move':
+                                coord = action_input.get('coordinate', [])
+                                f.write(f"Move to {coord}")
+                            elif action_type == 'screenshot':
+                                f.write("Screenshot")
+                            else:
+                                f.write(f"Computer: {action_type}")
+
         # If we have tool results to report, add them to messages
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
