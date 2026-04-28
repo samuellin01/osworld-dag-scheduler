@@ -33,6 +33,8 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import anthropic
+
 from google_sheets_oauth import create_sheet_from_template_oauth, create_doc_from_template_oauth, get_sheet_id_from_url
 
 # ---------------------------------------------------------------------------
@@ -587,13 +589,28 @@ def run_task(
         filter_to_n_most_recent_images(messages, images_to_keep=10, min_removal_threshold=10)
 
         # Call Bedrock.
-        content_blocks, _ = bedrock.chat(
-            messages=messages,
-            system=system_prompt,
-            model=model,
-            temperature=temperature,
-            tools=tools,
-        )
+        try:
+            content_blocks, _ = bedrock.chat(
+                messages=messages,
+                system=system_prompt,
+                model=model,
+                temperature=temperature,
+                tools=tools,
+            )
+        except anthropic.BadRequestError as e:
+            # Detect conversation history corruption bug
+            error_msg = str(e)
+            if "tool_use" in error_msg and "tool_result" in error_msg:
+                logger.error("CONVERSATION HISTORY CORRUPTION DETECTED at step %d", step)
+                logger.error("Error: %s", error_msg)
+                # Write error file for batch script to detect
+                error_file = os.path.join(output_dir, "error.txt")
+                with open(error_file, "w", encoding="utf-8") as fh:
+                    fh.write(f"ERROR: tool_result_missing\n{error_msg}\n")
+                raise RuntimeError(f"Conversation history corruption: {error_msg}") from e
+            else:
+                # Re-raise if it's a different BadRequestError
+                raise
 
         response_text = "".join(
             b.get("text", "")
