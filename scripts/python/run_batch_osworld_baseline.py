@@ -1624,16 +1624,41 @@ def main() -> None:
             )
 
             trial_score = None
-            result_txt = os.path.join(trial_result_dir, "result.txt")
-            if os.path.isfile(result_txt):
+            trial_error = None
+
+            # Check for error.txt first
+            error_txt = os.path.join(trial_result_dir, "error.txt")
+            if os.path.isfile(error_txt):
                 try:
-                    with open(result_txt) as fh:
-                        trial_score = float(fh.read().strip())
-                except (ValueError, OSError):
+                    with open(error_txt) as fh:
+                        error_content = fh.read()
+                        if "tool_result_missing" in error_content:
+                            trial_error = "tool_result_missing"
+                            logger.error(
+                                "Task %s trial %d: Conversation history corruption detected",
+                                task_id, trial_idx
+                            )
+                        else:
+                            trial_error = "unknown_error"
+                            logger.error(
+                                "Task %s trial %d: Error detected: %s",
+                                task_id, trial_idx, error_content[:200]
+                            )
+                except OSError:
                     pass
 
+            # Only read score if no error
+            if trial_error is None:
+                result_txt = os.path.join(trial_result_dir, "result.txt")
+                if os.path.isfile(result_txt):
+                    try:
+                        with open(result_txt) as fh:
+                            trial_score = float(fh.read().strip())
+                    except (ValueError, OSError):
+                        pass
+
             results[task_id]["trials"].append({
-                "trial": trial_idx, "run": run_ok, "score": trial_score,
+                "trial": trial_idx, "run": run_ok, "score": trial_score, "error": trial_error,
             })
 
             if not run_ok:
@@ -1682,8 +1707,11 @@ def main() -> None:
                     trial=trial_idx,
                 )
 
-            score_str = f" score={trial_score}" if trial_score is not None else ""
-            logger.info("Task %s trial %d COMPLETED.%s", task_id, trial_idx, score_str)
+            if trial_error:
+                logger.warning("Task %s trial %d ERROR: %s", task_id, trial_idx, trial_error)
+            else:
+                score_str = f" score={trial_score}" if trial_score is not None else ""
+                logger.info("Task %s trial %d COMPLETED.%s", task_id, trial_idx, score_str)
 
     # ---------------------------------------------------------------------------
     # Summary
@@ -1697,6 +1725,7 @@ def main() -> None:
         all_trials.extend(v.get("trials", []))
     run_success = [t for t in all_trials if t["run"]]
     run_failed = [t for t in all_trials if not t["run"]]
+    error_trials = [t for t in all_trials if t.get("error")]
     scores = [t["score"] for t in all_trials if t["score"] is not None]
 
     if skipped:
@@ -1708,6 +1737,11 @@ def main() -> None:
         len(all_trials),
         len(results),
     )
+
+    if error_trials:
+        logger.warning("Trials with errors: %d", len(error_trials))
+        for t in error_trials:
+            logger.warning("  - trial_%d: %s", t["trial"], t.get("error"))
 
     if scores:
         avg_score = sum(scores) / len(scores)
