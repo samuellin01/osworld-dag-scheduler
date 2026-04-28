@@ -264,10 +264,10 @@ def run_fork_agent(
         # Child agent: worker only, cannot fork
         system_prompt += (
             "You are a worker agent assigned a specific subtask. Your display has been prepared via setup config. "
-            "Focus on completing your subtask efficiently. When done, output DONE with your result. "
+            "Focus on completing your subtask efficiently. When done, output SUBTASK COMPLETE with your result. "
             "Your parent will automatically receive it.\n"
             "\n"
-            "Before outputting DONE, remind yourself what your subtask was and check you've actually completed it."
+            "Before outputting SUBTASK COMPLETE, remind yourself what your subtask was and check you've actually completed it."
         )
     else:
         # Root agent: can fork workers
@@ -749,31 +749,36 @@ def run_fork_agent(
                 runtime.fail_agent(agent_id, error=final_response_text)
                 return result
         else:
-            # Child agent: look for "DONE" at start of first line
-            first_line = final_response_text.strip().split('\n')[0].strip()
-            if re.match(r'^DONE(?:\s*$|[\s:.\-])', first_line, re.IGNORECASE):
-                logger.info(f"{tag} DONE at step {step}")
-                duration = time.time() - start_time
-                result = {
-                    "status": "DONE",
-                    "summary": final_response_text,
-                    "steps_used": step,
-                    "duration": duration,
-                }
-                runtime.complete_agent(agent_id, result=result)
-                return result
+            # Child agent: look for "SUBTASK COMPLETE" or "SUBTASK FAILED" at start of any line
+            # (Agent often puts thinking text on first line, then completion marker on later line)
+            lines = final_response_text.strip().split('\n')
+            for line in lines:
+                line = line.strip()
 
-            if re.match(r'^FAIL(?:\s*$|[\s:.\-])', first_line, re.IGNORECASE):
-                logger.info(f"{tag} FAIL at step {step}")
-                duration = time.time() - start_time
-                result = {
-                    "status": "FAIL",
-                    "summary": final_response_text,
-                    "steps_used": step,
-                    "duration": duration,
-                }
-                runtime.fail_agent(agent_id, error=final_response_text)
-                return result
+                # Primary completion markers
+                if re.search(r'\bSUBTASK\s+COMPLETE\b', line, re.IGNORECASE):
+                    logger.info(f"{tag} SUBTASK COMPLETE at step {step}")
+                    duration = time.time() - start_time
+                    result = {
+                        "status": "DONE",
+                        "summary": final_response_text,
+                        "steps_used": step,
+                        "duration": duration,
+                    }
+                    runtime.complete_agent(agent_id, result=result)
+                    return result
+
+                if re.search(r'\bSUBTASK\s+FAILED\b', line, re.IGNORECASE):
+                    logger.info(f"{tag} SUBTASK FAILED at step {step}")
+                    duration = time.time() - start_time
+                    result = {
+                        "status": "FAIL",
+                        "summary": final_response_text,
+                        "steps_used": step,
+                        "duration": duration,
+                    }
+                    runtime.fail_agent(agent_id, error=final_response_text)
+                    return result
 
     # Max steps reached
     logger.warning(f"{tag} Max steps ({max_steps}) reached")
