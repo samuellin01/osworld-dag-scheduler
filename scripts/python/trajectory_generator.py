@@ -236,7 +236,11 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
                 'steps': steps_dict,
             }
 
-    total_duration = (end_time - start_time).total_seconds() if start_time and end_time else 0
+    # Calculate total duration as max end time across all agents
+    if agent_timeline:
+        total_duration = max(agent_data['end'] for agent_data in agent_timeline.values())
+    else:
+        total_duration = (end_time - start_time).total_seconds() if start_time and end_time else 0
 
     return {
         'agent_timeline': agent_timeline,
@@ -274,8 +278,10 @@ def calculate_cost_from_tokens(local_path: pathlib.Path, api_calls: List[Dict]) 
         cache_read_tokens = usage.get('cache_read_input_tokens', 0)
 
         # Calculate cost
-        uncached_input = input_tokens - cache_read_tokens
-        total_cost += (uncached_input / 1_000_000) * 15.0  # $15/M input
+        # Note: cache_read_tokens and cache_creation_tokens are PART of input_tokens, not separate
+        # input_tokens = uncached_input + cache_read_tokens + cache_creation_tokens
+        uncached_input = input_tokens - cache_read_tokens - cache_creation_tokens
+        total_cost += (uncached_input / 1_000_000) * 15.0  # $15/M uncached input
         total_cost += (output_tokens / 1_000_000) * 75.0   # $75/M output
         total_cost += (cache_creation_tokens / 1_000_000) * 1.50  # $1.50/M cache write
         total_cost += (cache_read_tokens / 1_000_000) * 0.15  # $0.15/M cache read
@@ -537,6 +543,46 @@ h2 {{
     font-weight: 800;
     text-shadow: 0 0 12px rgba(248, 81, 73, 0.3);
 }}
+.cost-highlight {{
+    font-size: 1.15em;
+    color: #58a6ff;
+    text-shadow: 0 0 8px rgba(88, 166, 255, 0.2);
+}}
+.agent-status {{
+    font-size: 0.75em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    font-weight: 600;
+}}
+.agent-status-completed {{
+    background: rgba(63, 185, 80, 0.15);
+    color: #3fb950;
+}}
+.agent-status-completed::after {{
+    content: ' ✓';
+}}
+.agent-status-killed {{
+    background: rgba(248, 81, 73, 0.15);
+    color: #f85149;
+}}
+.agent-status-killed::after {{
+    content: ' ⚠';
+}}
+.agent-status-failed {{
+    background: rgba(248, 81, 73, 0.15);
+    color: #f85149;
+}}
+.agent-status-failed::after {{
+    content: ' ✗';
+}}
+.agent-status-running {{
+    background: rgba(88, 166, 255, 0.15);
+    color: #58a6ff;
+}}
+.agent-status-running::after {{
+    content: ' ⟳';
+}}
 
 /* Timeline Scrubber */
 .timeline-scrubber {{
@@ -630,9 +676,25 @@ h2 {{
     box-shadow: 0 2px 8px rgba(63, 185, 80, 0.3);
     top: 0;
 }}
-.timeline-bar.agent-child {{
+.timeline-bar.agent-child-0 {{
     background: linear-gradient(90deg, #58a6ff 0%, #1f6feb 100%);
     box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
+}}
+.timeline-bar.agent-child-1 {{
+    background: linear-gradient(90deg, #d29922 0%, #bb8009 100%);
+    box-shadow: 0 2px 8px rgba(210, 153, 34, 0.3);
+}}
+.timeline-bar.agent-child-2 {{
+    background: linear-gradient(90deg, #a371f7 0%, #8957e5 100%);
+    box-shadow: 0 2px 8px rgba(163, 113, 247, 0.3);
+}}
+.timeline-bar.agent-child-3 {{
+    background: linear-gradient(90deg, #f85149 0%, #da3633 100%);
+    box-shadow: 0 2px 8px rgba(248, 81, 73, 0.3);
+}}
+.timeline-bar.agent-child {{
+    background: linear-gradient(90deg, #8b949e 0%, #6e7681 100%);
+    box-shadow: 0 2px 8px rgba(139, 148, 158, 0.3);
 }}
 .timeline-bar-label {{
     position: absolute;
@@ -936,7 +998,7 @@ h2 {{
     h.append(f"  <span>Score: <strong class='{score_class}'>{esc(score_str)}</strong></span>")
     h.append(f"  <span>Duration: <strong>{fmt_duration(duration)}</strong></span>")
     h.append(f"  <span>Agents: <strong>{num_agents}</strong> {'(parallelized)' if forked else ''}</span>")
-    h.append(f"  <span>Cost: <strong>${cost:.2f}</strong></span>")
+    h.append(f"  <span>Cost: <strong class='cost-highlight'>${cost:.2f}</strong></span>")
     h.append("</div>")
 
     # Timeline Scrubber
@@ -964,11 +1026,35 @@ h2 {{
         display_width_pct = max(duration_pct, min_width_pct)
 
         is_root = (agent_id == 'root')
-        bar_class = 'agent-root' if is_root else 'agent-child'
+
+        # Determine bar class with specific child colors
+        if is_root:
+            bar_class = 'agent-root'
+        else:
+            # Extract child number for specific colors (root_child_0 -> 0)
+            if 'child_' in agent_id:
+                child_num = agent_id.split('_')[-1]
+                bar_class = f'agent-child-{child_num}'
+            else:
+                bar_class = 'agent-child'
+
         top_offset = 0 if is_root else (idx * 24)
 
-        h.append(f"    <div class='timeline-bar {bar_class}' style='left: {start_pct:.1f}%; width: {display_width_pct:.1f}%; top: {top_offset}px' title='{esc(agent_id)}'>")
-        h.append(f"      <div class='timeline-bar-label'>{esc(agent_id)}</div>")
+        # Status icon
+        status = agent.get('status', 'unknown')
+        status_icon = {'completed': '✓', 'killed': '⚠', 'failed': '✗', 'running': '⟳'}.get(status, '')
+
+        # Build label with step count and status
+        step_count = len(agent.get('steps', []))
+        label = f"{agent_id} ({step_count} steps) {status_icon}".strip()
+
+        # Build detailed tooltip
+        start_time = fmt_duration(agent['start'])
+        end_time = fmt_duration(agent['end'])
+        tooltip = f"{agent_id}: {start_time} → {end_time} ({step_count} steps, {status})"
+
+        h.append(f"    <div class='timeline-bar {bar_class}' style='left: {start_pct:.1f}%; width: {display_width_pct:.1f}%; top: {top_offset}px' title='{esc(tooltip)}'>")
+        h.append(f"      <div class='timeline-bar-label'>{esc(label)}</div>")
         h.append("    </div>")
 
     h.append("      <div class='timeline-playhead' id='timeline-playhead' style='left: 0%'></div>")
@@ -983,9 +1069,12 @@ h2 {{
     for agent in agent_data:
         agent_id = agent['id']
         display = agent['display']
+        status = agent.get('status', 'unknown')
+        status_class = f'agent-status agent-status-{status}'
+
         h.append(f"  <div class='display-panel' id='panel-{esc(agent_id)}'>")
         h.append(f"    <div class='display-panel-header'>")
-        h.append(f"      <span><strong>{esc(agent_id)}</strong> (Display {esc(str(display))})</span>")
+        h.append(f"      <span><strong>{esc(agent_id)}</strong> (Display {esc(str(display))}) <span class='{status_class}'>{esc(status)}</span></span>")
         h.append(f"      <span class='display-panel-step' id='panel-step-{esc(agent_id)}'>Step —</span>")
         h.append(f"    </div>")
         h.append(f"    <img id='panel-img-{esc(agent_id)}' src='' alt='No screenshot' style='display:none'>")
