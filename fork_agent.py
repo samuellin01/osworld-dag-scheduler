@@ -732,13 +732,18 @@ def run_fork_agent(
             # Root agent: look for "TASK COMPLETED" anywhere
             if re.search(r'TASK\s+COMPLETED', final_response_text, re.IGNORECASE):
                 logger.info(f"{tag} TASK COMPLETED at step {step}")
-                duration = time.time() - start_time
+                completion_time = time.time()
+                duration = completion_time - start_time
                 result = {
                     "status": "DONE",
                     "summary": final_response_text,
                     "steps_used": step,
                     "duration": duration,
                 }
+                # Save completion timestamp
+                if output_dir:
+                    with open(os.path.join(output_dir, "completion_timestamp.txt"), "w") as f:
+                        f.write(f"{completion_time:.6f}\n")
                 runtime.complete_agent(agent_id, result=result)
                 return result
 
@@ -763,13 +768,18 @@ def run_fork_agent(
                 # Primary completion markers
                 if re.search(r'\bSUBTASK\s+COMPLETE\b', line, re.IGNORECASE):
                     logger.info(f"{tag} SUBTASK COMPLETE at step {step}")
-                    duration = time.time() - start_time
+                    completion_time = time.time()
+                    duration = completion_time - start_time
                     result = {
                         "status": "DONE",
                         "summary": final_response_text,
                         "steps_used": step,
                         "duration": duration,
                     }
+                    # Save completion timestamp
+                    if output_dir:
+                        with open(os.path.join(output_dir, "completion_timestamp.txt"), "w") as f:
+                            f.write(f"{completion_time:.6f}\n")
                     runtime.complete_agent(agent_id, result=result)
                     return result
 
