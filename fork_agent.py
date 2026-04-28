@@ -13,6 +13,8 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import anthropic
+
 from agent_runtime import AgentRuntime
 from agent_utils import (
     COMPUTER_USE_TOOL,
@@ -478,7 +480,7 @@ def run_fork_agent(
 
             obs_content.append({"type": "text", "text": f"Step {step}: screenshot unavailable."})
 
-        # Prepend tool_result if needed
+        # Prepend tool_result if needed (must be first in obs_content)
         if last_tool_use_id:
             obs_content.insert(0, {
                 "type": "tool_result",
@@ -490,13 +492,34 @@ def run_fork_agent(
         messages.append({"role": "user", "content": obs_content})
 
         # Call LLM
-        content_blocks, _ = bedrock.chat(
-            messages=messages,
-            system=system_prompt,
-            model=model,
-            temperature=temperature,
-            tools=tools,
-        )
+        try:
+            content_blocks, _ = bedrock.chat(
+                messages=messages,
+                system=system_prompt,
+                model=model,
+                temperature=temperature,
+                tools=tools,
+            )
+        except anthropic.BadRequestError as e:
+            # Detect conversation history corruption bug
+            error_msg = str(e)
+            if "tool_use" in error_msg and "tool_result" in error_msg:
+                logger.error(f"{tag} CONVERSATION HISTORY CORRUPTION DETECTED at step {step}")
+                logger.error(f"{tag} Error: {error_msg}")
+                duration = time.time() - start_time
+                result = {
+                    "status": "ERROR",
+                    "error_type": "tool_result_missing",
+                    "error": f"Conversation history corruption: {error_msg}",
+                    "steps_used": step,
+                    "duration": duration,
+                }
+                runtime.fail_agent(agent_id, error=result["error"])
+                return result
+            else:
+                # Re-raise if it's a different BadRequestError
+                raise
+
         messages.append({"role": "assistant", "content": content_blocks})
 
         # Extract response text
