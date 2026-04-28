@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
 
-from google_sheets_oauth import create_sheet_from_template_oauth, create_doc_from_template_oauth, get_sheet_id_from_url
+from google_workspace_oauth import create_sheet_from_template_oauth, create_doc_from_template_oauth, get_sheet_id_from_url
 
 # ---------------------------------------------------------------------------
 # Logger
