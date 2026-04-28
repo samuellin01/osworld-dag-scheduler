@@ -92,18 +92,18 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
             else:
                 agent_id = 'root'
 
-        # Increment step counter for this agent
+        # Initialize agent entry
         if agent_id not in agent_step_counters:
             agent_step_counters[agent_id] = 0
-        agent_step_counters[agent_id] += 1
-        step_num = agent_step_counters[agent_id]
+        if agent_id not in agent_steps_map:
+            agent_steps_map[agent_id] = {}
 
-        # Extract action details from response content blocks
-        action_detail = ""
-        tool_name = ""
-
+        # Extract all actions from response content blocks
         response = call.get('response', {})
         content_blocks = response.get('content_blocks', [])
+
+        # Collect all tool uses and text blocks
+        actions_in_response = []
 
         for block in content_blocks:
             if not isinstance(block, dict):
@@ -112,14 +112,17 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
             # Text block
             if block.get('type') == 'text':
                 text = block.get('text', '').strip()
-                if text and not action_detail:
-                    # Use full text (no truncation)
-                    action_detail = text
+                if text:
+                    actions_in_response.append({
+                        'action': text,
+                        'tool': '',
+                    })
 
             # Tool use block
             elif block.get('type') == 'tool_use':
                 tool_name = block.get('name', '')
                 tool_input = block.get('input', {})
+                action_detail = ""
 
                 if tool_name == 'computer':
                     action = tool_input.get('action', '')
@@ -162,18 +165,25 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
                 else:
                     action_detail = f"Tool: {tool_name}"
 
-                # Prefer tool action over text
-                break
+                if action_detail:
+                    actions_in_response.append({
+                        'action': action_detail,
+                        'tool': tool_name,
+                    })
 
-        # Store step data
-        if agent_id not in agent_steps_map:
-            agent_steps_map[agent_id] = {}
+        # Create a step entry for each action (or one for the whole response if no actions)
+        if not actions_in_response:
+            actions_in_response = [{'action': 'Step executed', 'tool': ''}]
 
-        agent_steps_map[agent_id][step_num] = {
-            'timestamp': relative_time,
-            'action': action_detail,
-            'tool': tool_name,
-        }
+        for action_info in actions_in_response:
+            agent_step_counters[agent_id] += 1
+            step_num = agent_step_counters[agent_id]
+
+            agent_steps_map[agent_id][step_num] = {
+                'timestamp': relative_time,
+                'action': action_info['action'],
+                'tool': action_info['tool'],
+            }
 
     # Supplement with direct file reading for agents not in API calls
     for agent_id, agent_dir in agent_dirs:
@@ -235,21 +245,42 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
     }
 
 
-def calculate_cost_from_tokens(local_path: pathlib.Path) -> float:
-    """Read cost from token_usage.json."""
+def calculate_cost_from_tokens(local_path: pathlib.Path, api_calls: List[Dict]) -> float:
+    """Calculate cost from token_usage.json or bedrock_api_calls.jsonl."""
     token_usage_path = local_path / "token_usage.json"
-    if not token_usage_path.is_file():
-        return 0.0
 
-    try:
-        with open(token_usage_path, 'r', encoding='utf-8') as f:
-            usage = json.load(f)
+    # Try token_usage.json first
+    if token_usage_path.is_file():
+        try:
+            with open(token_usage_path, 'r', encoding='utf-8') as f:
+                usage = json.load(f)
+            cost = usage.get('total_cost_usd', 0.0)
+            if cost > 0:
+                return cost
+        except (json.JSONDecodeError, OSError):
+            pass
 
-        # Use pre-computed cost from token_usage.json
-        return usage.get('total_cost_usd', 0.0)
+    # Fallback: calculate from bedrock_api_calls.jsonl
+    # Opus 4.6 pricing: $15/M input, $75/M output, $1.50/M cache write, $0.15/M cache read
+    total_cost = 0.0
+    for call in api_calls:
+        if call.get('event') != 'api_call':
+            continue
 
-    except (json.JSONDecodeError, OSError):
-        return 0.0
+        usage = call.get('response', {}).get('usage', {})
+        input_tokens = usage.get('input_tokens', 0)
+        output_tokens = usage.get('output_tokens', 0)
+        cache_creation_tokens = usage.get('cache_creation_input_tokens', 0)
+        cache_read_tokens = usage.get('cache_read_input_tokens', 0)
+
+        # Calculate cost
+        uncached_input = input_tokens - cache_read_tokens
+        total_cost += (uncached_input / 1_000_000) * 15.0  # $15/M input
+        total_cost += (output_tokens / 1_000_000) * 75.0   # $75/M output
+        total_cost += (cache_creation_tokens / 1_000_000) * 1.50  # $1.50/M cache write
+        total_cost += (cache_read_tokens / 1_000_000) * 0.15  # $0.15/M cache read
+
+    return total_cost
 
 
 def generate_trajectory_html(
@@ -328,7 +359,7 @@ def generate_trajectory_html(
     total_duration = timeline_data['total_duration'] or duration
 
     # Calculate cost from token usage
-    cost = calculate_cost_from_tokens(local_path)
+    cost = calculate_cost_from_tokens(local_path, api_calls)
 
     # -- Helper -------------------------------------------------------------
 
@@ -450,6 +481,8 @@ body {{
     color: #e6edf3;
     padding: 24px;
     line-height: 1.6;
+    max-width: 100%;
+    overflow-x: hidden;
 }}
 h1 {{
     font-size: 1.8em;
@@ -513,6 +546,8 @@ h2 {{
     padding: 20px;
     margin-bottom: 28px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    max-width: 100%;
+    overflow: hidden;
 }}
 .timeline-header {{
     display: flex;
@@ -576,6 +611,7 @@ h2 {{
     position: relative;
     height: {timeline_height}px;
     margin-top: 12px;
+    overflow: hidden;
 }}
 .timeline-bar {{
     position: absolute;
