@@ -382,6 +382,18 @@ def generate_trajectory_html(
 
     # -- Build agent step data with screenshots -----------------------------
 
+    # Find earliest timestamp across all agents for relative timing
+    first_timestamp = None
+    for agent_id, agent_dir in agent_dirs:
+        timestamp_file = agent_dir / "step_001_timestamp.txt"
+        if timestamp_file.is_file():
+            try:
+                ts = float(timestamp_file.read_text().strip())
+                if first_timestamp is None or ts < first_timestamp:
+                    first_timestamp = ts
+            except (ValueError, OSError):
+                pass
+
     agent_data = []
     for agent_id, agent_dir in agent_dirs:
         step_files = sorted([f for f in agent_dir.glob("step_*.png")])
@@ -393,9 +405,18 @@ def generate_trajectory_html(
                 continue
             step_num = int(m.group(1))
 
-            # Get step info from timeline
+            # Read timestamp from step_NNN_timestamp.txt (absolute time when screenshot was taken)
+            timestamp = 0
+            timestamp_file = agent_dir / f"step_{step_num:03d}_timestamp.txt"
+            if timestamp_file.is_file():
+                try:
+                    absolute_ts = float(timestamp_file.read_text().strip())
+                    timestamp = absolute_ts - first_timestamp if first_timestamp else 0
+                except (ValueError, OSError):
+                    pass
+
+            # Get action from API call logs as fallback
             step_info = agent_steps_map.get(agent_id, {}).get(step_num, {})
-            timestamp = step_info.get('timestamp', 0)
             action = step_info.get('action', '')
 
             # Read thinking/reasoning from step response file
