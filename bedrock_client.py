@@ -243,7 +243,7 @@ class BedrockClient:
     ``betas=["computer-use-2025-11-24"]`` when computer-use tools are present.
     """
 
-    def __init__(self, region: Optional[str] = None, log_dir: Optional[str] = None) -> None:
+    def __init__(self, region: Optional[str] = None, log_dir: Optional[str] = None, agent_id: Optional[str] = None) -> None:
         region = region or os.environ.get("AWS_REGION", "us-east-1")
         # Only pass explicit credentials when set; otherwise let the SDK use
         # the default AWS credential chain (env vars, config files, IAM roles).
@@ -259,6 +259,7 @@ class BedrockClient:
             client_kwargs["aws_session_token"] = session_token
         self._client = AnthropicBedrock(**client_kwargs)
 
+        self._agent_id = agent_id
         self._log_dir = log_dir
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
@@ -488,7 +489,7 @@ class BedrockClient:
                 else:
                     messages_section = _build_redacted_messages(messages)
 
-                self._append_jsonl({
+                log_entry = {
                     "event": "api_call",
                     "request_timestamp": req_ts,
                     "response_timestamp": resp_ts,
@@ -509,7 +510,10 @@ class BedrockClient:
                         "cache_creation_input_tokens": self._cumulative_cache_creation_tokens,
                         "cache_read_input_tokens": self._cumulative_cache_read_tokens,
                     },
-                })
+                }
+                if self._agent_id:
+                    log_entry["agent_id"] = self._agent_id
+                self._append_jsonl(log_entry)
 
                 return content_blocks, response_dict
             except anthropic.APIStatusError as exc:
@@ -532,7 +536,7 @@ class BedrockClient:
                         req_summary["num_messages"],
                         req_summary["total_estimated_chars"],
                     )
-                    self._append_jsonl({
+                    err_entry = {
                         "event": "api_error",
                         "error_timestamp": err_ts,
                         "error": str(exc),
@@ -541,7 +545,10 @@ class BedrockClient:
                             "system_prompt": system,
                             "messages": _build_redacted_messages(messages),
                         },
-                    })
+                    }
+                    if self._agent_id:
+                        err_entry["agent_id"] = self._agent_id
+                    self._append_jsonl(err_entry)
                     raise
         raise RuntimeError(
             f"Bedrock invoke failed after {_MAX_RETRIES} retries (throttling)."
