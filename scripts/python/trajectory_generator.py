@@ -1202,6 +1202,15 @@ function updateDisplays(time) {
         const thinkingEl = document.getElementById('panel-thinking-' + agentId);
         const actionEl = document.getElementById('panel-action-' + agentId);
 
+        // Hide display if before agent starts or after agent finishes
+        if (time < agent.start || time > agent.end) {
+            imgEl.style.display = 'none';
+            stepEl.textContent = 'Step —';
+            thinkingEl.style.display = 'none';
+            actionEl.style.display = 'none';
+            return;
+        }
+
         // Find the latest step at or before current time
         let currentStep = null;
         for (const step of agent.steps) {
