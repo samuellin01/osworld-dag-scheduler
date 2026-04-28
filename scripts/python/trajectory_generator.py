@@ -355,15 +355,30 @@ def generate_trajectory_html(
 
     # -- Build action log ---------------------------------------------------
 
+    def classify_action_type(action_text: str, tool_name: str) -> str:
+        """Classify action into communication or regular types."""
+        if tool_name == 'fork_subtask' or action_text.startswith('Fork worker'):
+            return 'fork'
+        elif tool_name == 'message_child' or action_text.startswith('Message to'):
+            return 'message'
+        elif tool_name == 'peek_child' or action_text.startswith('Peek at'):
+            return 'peek'
+        elif action_text.startswith('DONE') or action_text.startswith('TASK COMPLETED'):
+            return 'report'
+        else:
+            return 'action'
+
     all_actions = []
     for agent_id, steps_dict in agent_steps_map.items():
         for step_num in sorted(steps_dict.keys()):
             step_info = steps_dict[step_num]
+            action_type = classify_action_type(step_info['action'], step_info.get('tool', ''))
             all_actions.append({
                 'timestamp': step_info['timestamp'],
                 'agent': agent_id,
                 'step': step_num,
                 'action': step_info['action'],
+                'type': action_type,
             })
 
     all_actions.sort(key=lambda x: x['timestamp'])
@@ -690,6 +705,41 @@ h2 {{
 .action-item:last-child {{
     border-bottom: none;
 }}
+
+/* Communication action types */
+.action-item.fork {{
+    background: linear-gradient(90deg, rgba(163, 113, 247, 0.08) 0%, rgba(163, 113, 247, 0.02) 100%);
+    border-left: 3px solid #a371f7;
+}}
+.action-item.fork:hover {{
+    background: linear-gradient(90deg, rgba(163, 113, 247, 0.15) 0%, rgba(163, 113, 247, 0.05) 100%);
+    border-left: 3px solid #a371f7;
+}}
+.action-item.message {{
+    background: linear-gradient(90deg, rgba(247, 208, 88, 0.08) 0%, rgba(247, 208, 88, 0.02) 100%);
+    border-left: 3px solid #f7d058;
+}}
+.action-item.message:hover {{
+    background: linear-gradient(90deg, rgba(247, 208, 88, 0.15) 0%, rgba(247, 208, 88, 0.05) 100%);
+    border-left: 3px solid #f7d058;
+}}
+.action-item.peek {{
+    background: linear-gradient(90deg, rgba(88, 166, 255, 0.08) 0%, rgba(88, 166, 255, 0.02) 100%);
+    border-left: 3px solid #58a6ff;
+}}
+.action-item.peek:hover {{
+    background: linear-gradient(90deg, rgba(88, 166, 255, 0.15) 0%, rgba(88, 166, 255, 0.05) 100%);
+    border-left: 3px solid #58a6ff;
+}}
+.action-item.report {{
+    background: linear-gradient(90deg, rgba(63, 185, 80, 0.08) 0%, rgba(63, 185, 80, 0.02) 100%);
+    border-left: 3px solid #3fb950;
+}}
+.action-item.report:hover {{
+    background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, rgba(63, 185, 80, 0.05) 100%);
+    border-left: 3px solid #3fb950;
+}}
+
 .action-time {{
     color: #8b949e;
     font-family: 'SF Mono', Monaco, monospace;
@@ -706,6 +756,26 @@ h2 {{
     color: #c9d1d9;
     word-wrap: break-word;
     line-height: 1.6;
+}}
+.action-detail::before {{
+    margin-right: 8px;
+    font-weight: 700;
+}}
+.action-item.fork .action-detail::before {{
+    content: '🔀 ';
+    color: #a371f7;
+}}
+.action-item.message .action-detail::before {{
+    content: '💬 ';
+    color: #f7d058;
+}}
+.action-item.peek .action-detail::before {{
+    content: '👀 ';
+    color: #58a6ff;
+}}
+.action-item.report .action-detail::before {{
+    content: '✅ ';
+    color: #3fb950;
 }}
 
 /* Tabs */
@@ -739,6 +809,35 @@ h2 {{
 .tab-content.active {{
     display: block;
 }}
+
+/* Communication Legend */
+.comm-legend {{
+    display: flex;
+    gap: 20px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    font-size: 0.85em;
+    flex-wrap: wrap;
+}}
+.comm-legend-item {{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #8b949e;
+}}
+.comm-legend-icon {{
+    font-size: 1.1em;
+}}
+.comm-legend-label {{
+    font-weight: 500;
+}}
+.comm-legend-item.fork .comm-legend-label {{ color: #a371f7; }}
+.comm-legend-item.message .comm-legend-label {{ color: #f7d058; }}
+.comm-legend-item.peek .comm-legend-label {{ color: #58a6ff; }}
+.comm-legend-item.report .comm-legend-label {{ color: #3fb950; }}
 """)
     h.append("</style>")
     h.append("</head>")
@@ -816,11 +915,33 @@ h2 {{
 
     # Action Log
     h.append("<div id='tab-log' class='tab-content active'>")
+
+    # Communication Legend
+    h.append("  <div class='comm-legend'>")
+    h.append("    <div class='comm-legend-item fork'>")
+    h.append("      <span class='comm-legend-icon'>🔀</span>")
+    h.append("      <span class='comm-legend-label'>Fork Worker</span>")
+    h.append("    </div>")
+    h.append("    <div class='comm-legend-item message'>")
+    h.append("      <span class='comm-legend-icon'>💬</span>")
+    h.append("      <span class='comm-legend-label'>Message</span>")
+    h.append("    </div>")
+    h.append("    <div class='comm-legend-item peek'>")
+    h.append("      <span class='comm-legend-icon'>👀</span>")
+    h.append("      <span class='comm-legend-label'>Peek</span>")
+    h.append("    </div>")
+    h.append("    <div class='comm-legend-item report'>")
+    h.append("      <span class='comm-legend-icon'>✅</span>")
+    h.append("      <span class='comm-legend-label'>Report/Done</span>")
+    h.append("    </div>")
+    h.append("  </div>")
+
     h.append("  <div class='action-log'>")
 
     for action in all_actions:
         time_str = fmt_duration(action['timestamp'])
-        h.append("    <div class='action-item'>")
+        action_type = action.get('type', 'action')
+        h.append(f"    <div class='action-item {esc(action_type)}'>")
         h.append(f"      <div class='action-time'>{esc(time_str)}</div>")
         h.append(f"      <div class='action-agent'>{esc(action['agent'])} step {action['step']}</div>")
         h.append(f"      <div class='action-detail'>{esc(action['action'])}</div>")
