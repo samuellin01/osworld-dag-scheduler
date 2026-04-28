@@ -69,14 +69,18 @@ def generate_trajectory_html(
 
     # Discover agent directories (root, root_child_0, root_child_1, etc.)
     agent_dirs: List[tuple[str, pathlib.Path]] = []
+    print(f"Scanning for agent directories in: {local_path}")
     for d in sorted(local_path.iterdir()):
+        print(f"  Found: {d.name} (is_dir={d.is_dir()})")
         if not d.is_dir():
             continue
         # Match agent directories (root, root_child_0, root_child_1, etc.)
         if d.name == "root" or d.name.startswith("root_child_"):
             agent_dirs.append((d.name, d))
+            print(f"    -> Matched as agent directory")
 
     agent_dirs.sort()  # root comes first, then root_child_0, root_child_1, etc.
+    print(f"Found {len(agent_dirs)} agent directories: {[name for name, _ in agent_dirs]}")
 
     total_agents = len(agent_dirs)
     duration = result_data.get("duration", 0)
