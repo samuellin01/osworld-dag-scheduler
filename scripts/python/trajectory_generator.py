@@ -189,7 +189,7 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
 
 
 def calculate_cost_from_tokens(local_path: pathlib.Path) -> float:
-    """Calculate cost from token_usage.json using Opus 4 pricing."""
+    """Read cost from token_usage.json."""
     token_usage_path = local_path / "token_usage.json"
     if not token_usage_path.is_file():
         return 0.0
@@ -198,20 +198,8 @@ def calculate_cost_from_tokens(local_path: pathlib.Path) -> float:
         with open(token_usage_path, 'r', encoding='utf-8') as f:
             usage = json.load(f)
 
-        # Opus 4.6 pricing (as of early 2026)
-        # Input: $15 per million tokens
-        # Output: $75 per million tokens
-        input_tokens = usage.get('input_tokens', 0)
-        output_tokens = usage.get('output_tokens', 0)
-        cache_read_tokens = usage.get('cache_read_input_tokens', 0)
-
-        # Cache read is cheaper: $1.50 per million
-        input_cost = (input_tokens / 1_000_000) * 15.0
-        cache_cost = (cache_read_tokens / 1_000_000) * 1.5
-        output_cost = (output_tokens / 1_000_000) * 75.0
-
-        total_cost = input_cost + cache_cost + output_cost
-        return total_cost
+        # Use pre-computed cost from token_usage.json
+        return usage.get('total_cost_usd', 0.0)
 
     except (json.JSONDecodeError, OSError):
         return 0.0
@@ -324,6 +312,18 @@ def generate_trajectory_html(
             timestamp = step_info.get('timestamp', 0)
             action = step_info.get('action', '')
 
+            # Read thinking/reasoning from step response file
+            thinking = ""
+            response_file = agent_dir / f"step_{step_num:03d}_response.txt"
+            if response_file.is_file():
+                try:
+                    thinking = response_file.read_text(encoding='utf-8', errors='replace').strip()
+                    # Limit thinking to first 500 chars for display
+                    if len(thinking) > 500:
+                        thinking = thinking[:500] + "..."
+                except OSError:
+                    pass
+
             # Screenshot URL
             screenshot_url = f"{img_base}/{agent_id}/step_{step_num:03d}.png"
 
@@ -331,6 +331,7 @@ def generate_trajectory_html(
                 'num': step_num,
                 'timestamp': timestamp,
                 'action': action,
+                'thinking': thinking,
                 'screenshot': screenshot_url,
             })
 
@@ -389,11 +390,14 @@ body {{
     line-height: 1.6;
 }}
 h1 {{
-    font-size: 1.6em;
-    margin-bottom: 12px;
-    color: #f0f6fc;
-    font-weight: 700;
-    letter-spacing: -0.02em;
+    font-size: 1.8em;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, #f0f6fc 0%, #c9d1d9 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800;
+    letter-spacing: -0.03em;
 }}
 h2 {{
     font-size: 1.1em;
@@ -407,20 +411,37 @@ h2 {{
 .meta {{
     display: flex;
     flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 24px;
+    gap: 10px;
+    margin: 20px 0 32px 0;
     font-size: 0.9em;
 }}
 .meta span {{
     background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
-    padding: 8px 14px;
-    border-radius: 8px;
+    padding: 10px 16px;
+    border-radius: 10px;
     border: 1px solid #30363d;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    transition: transform 0.15s, box-shadow 0.15s;
 }}
-.meta strong {{ color: #e6edf3; font-weight: 600; }}
-.score-pass {{ color: #3fb950; font-weight: 700; }}
-.score-fail {{ color: #f85149; font-weight: 700; }}
+.meta span:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}}
+.meta strong {{
+    color: #e6edf3;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}}
+.score-pass {{
+    color: #3fb950;
+    font-weight: 800;
+    text-shadow: 0 0 12px rgba(63, 185, 80, 0.3);
+}}
+.score-fail {{
+    color: #f85149;
+    font-weight: 800;
+    text-shadow: 0 0 12px rgba(248, 81, 73, 0.3);
+}}
 
 /* Timeline Scrubber */
 .timeline-scrubber {{
@@ -590,10 +611,25 @@ h2 {{
     border: 1px solid #30363d;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }}
+.display-panel-thinking {{
+    font-size: 0.85em;
+    color: #c9d1d9;
+    margin-top: 12px;
+    padding: 12px;
+    background: linear-gradient(135deg, #1c2128 0%, #22272e 100%);
+    border-radius: 8px;
+    border-left: 3px solid #58a6ff;
+    line-height: 1.6;
+    font-style: italic;
+}}
+.display-panel-thinking::before {{
+    content: '\U0001F4AD ';
+    opacity: 0.6;
+}}
 .display-panel-action {{
     font-size: 0.8em;
     color: #e6edf3;
-    margin-top: 12px;
+    margin-top: 8px;
     padding: 10px;
     background: #0d1117;
     border-radius: 6px;
@@ -601,6 +637,14 @@ h2 {{
     word-wrap: break-word;
     border: 1px solid #21262d;
     line-height: 1.5;
+}}
+.display-panel-action::before {{
+    content: '\u26A1 Action: ';
+    color: #79c0ff;
+    font-weight: 600;
+    display: block;
+    margin-bottom: 6px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }}
 
 /* Action Log */
@@ -632,13 +676,16 @@ h2 {{
     display: grid;
     grid-template-columns: 90px 140px 1fr;
     gap: 16px;
-    padding: 10px;
+    padding: 12px 10px;
     border-bottom: 1px solid #21262d;
     font-size: 0.85em;
-    transition: background 0.15s;
+    transition: all 0.15s;
+    border-radius: 4px;
 }}
 .action-item:hover {{
-    background: rgba(56, 139, 253, 0.05);
+    background: linear-gradient(90deg, rgba(56, 139, 253, 0.08) 0%, rgba(56, 139, 253, 0.03) 100%);
+    border-left: 2px solid #58a6ff;
+    padding-left: 8px;
 }}
 .action-item:last-child {{
     border-bottom: none;
@@ -647,16 +694,18 @@ h2 {{
     color: #8b949e;
     font-family: 'SF Mono', Monaco, monospace;
     font-variant-numeric: tabular-nums;
-    font-weight: 500;
+    font-weight: 600;
+    font-size: 0.9em;
 }}
 .action-agent {{
     color: #79c0ff;
-    font-weight: 600;
+    font-weight: 700;
+    font-size: 0.9em;
 }}
 .action-detail {{
-    color: #e6edf3;
+    color: #c9d1d9;
     word-wrap: break-word;
-    line-height: 1.5;
+    line-height: 1.6;
 }}
 
 /* Tabs */
@@ -697,7 +746,7 @@ h2 {{
 
     # Header
     h.append(f"<h1>Task {esc(task_id)}</h1>")
-    h.append(f"<p style='margin-bottom:12px;color:#b1bac4;font-size:0.9em'>{esc(instruction)}</p>")
+    h.append(f"<p style='margin:16px 0 8px 0;color:#8b949e;font-size:0.95em;line-height:1.6;max-width:900px;font-weight:400'>{esc(instruction)}</p>")
 
     # Meta info
     score_class = "score-pass" if score_str not in ["N/A", "0", "0.0"] else "score-fail"
@@ -754,6 +803,7 @@ h2 {{
         h.append(f"      <span class='display-panel-step' id='panel-step-{esc(agent_id)}'>Step —</span>")
         h.append(f"    </div>")
         h.append(f"    <img id='panel-img-{esc(agent_id)}' src='' alt='No screenshot' style='display:none'>")
+        h.append(f"    <div id='panel-thinking-{esc(agent_id)}' class='display-panel-thinking' style='display:none'></div>")
         h.append(f"    <div id='panel-action-{esc(agent_id)}' class='display-panel-action' style='display:none'></div>")
         h.append(f"  </div>")
 
@@ -809,6 +859,7 @@ function updateDisplays(time) {
         const agentId = agent.id;
         const imgEl = document.getElementById('panel-img-' + agentId);
         const stepEl = document.getElementById('panel-step-' + agentId);
+        const thinkingEl = document.getElementById('panel-thinking-' + agentId);
         const actionEl = document.getElementById('panel-action-' + agentId);
 
         // Find the latest step at or before current time
@@ -825,6 +876,14 @@ function updateDisplays(time) {
             imgEl.src = currentStep.screenshot;
             imgEl.style.display = 'block';
             stepEl.textContent = 'Step ' + currentStep.num;
+
+            if (currentStep.thinking) {
+                thinkingEl.textContent = currentStep.thinking;
+                thinkingEl.style.display = 'block';
+            } else {
+                thinkingEl.style.display = 'none';
+            }
+
             if (currentStep.action) {
                 actionEl.textContent = currentStep.action;
                 actionEl.style.display = 'block';
@@ -834,6 +893,7 @@ function updateDisplays(time) {
         } else {
             imgEl.style.display = 'none';
             stepEl.textContent = 'Step —';
+            thinkingEl.style.display = 'none';
             actionEl.style.display = 'none';
         }
     });
