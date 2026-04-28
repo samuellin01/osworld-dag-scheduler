@@ -8,20 +8,32 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 
-def parse_bedrock_api_calls(local_path: pathlib.Path) -> List[Dict]:
-    """Parse bedrock_api_calls.jsonl to extract action details and timestamps."""
-    api_calls_path = local_path / "bedrock_api_calls.jsonl"
-    if not api_calls_path.is_file():
-        return []
-
+def parse_bedrock_api_calls(local_path: pathlib.Path, agent_dirs: List[Tuple[str, pathlib.Path]]) -> List[Dict]:
+    """Parse bedrock_api_calls.jsonl from root and all agent directories."""
     calls = []
-    try:
-        with open(api_calls_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    calls.append(json.loads(line))
-    except (json.JSONDecodeError, OSError):
-        pass
+
+    # Read from root directory
+    api_calls_path = local_path / "bedrock_api_calls.jsonl"
+    if api_calls_path.is_file():
+        try:
+            with open(api_calls_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        calls.append(json.loads(line))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Also read from each agent directory
+    for agent_id, agent_dir in agent_dirs:
+        agent_api_calls_path = agent_dir / "bedrock_api_calls.jsonl"
+        if agent_api_calls_path.is_file():
+            try:
+                with open(agent_api_calls_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            calls.append(json.loads(line))
+            except (json.JSONDecodeError, OSError):
+                pass
 
     return calls
 
@@ -56,31 +68,29 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
 
         relative_time = (response_ts - start_time).total_seconds() if start_time else 0
 
-        # Determine agent ID from system prompt
-        request = call.get('request', {})
-        system_prompt = request.get('system_prompt', '')
-        tools = request.get('tools', [])
+        # Get agent ID directly from log entry (if available)
+        agent_id = call.get('agent_id')
 
-        # Worker agents have "You are a worker agent" in system prompt
-        # Root has fork_subtask in tools
-        if 'You are a worker agent' in system_prompt:
-            # This is a worker - need to figure out which one
-            # Workers have different display numbers mentioned in system prompt
-            # Look for "chrome_display_2" pattern
-            display_match = re.search(r'chrome_display_(\d+)', system_prompt)
-            if display_match:
-                display_num = int(display_match.group(1))
-                # Map display to agent ID (display 0 = root, display 2+ = workers)
-                if display_num == 0:
-                    agent_id = 'root'
+        # Fallback: Infer from system prompt if agent_id not in log
+        if not agent_id:
+            request = call.get('request', {})
+            system_prompt = request.get('system_prompt', '')
+
+            # Worker agents have "You are a worker agent" in system prompt
+            if 'You are a worker agent' in system_prompt:
+                # Look for display number pattern
+                display_match = re.search(r'chrome_display_(\d+)', system_prompt)
+                if display_match:
+                    display_num = int(display_match.group(1))
+                    if display_num == 0:
+                        agent_id = 'root'
+                    else:
+                        # Display 2 = root_child_0, display 3 = root_child_1, etc.
+                        agent_id = f'root_child_{display_num - 2}'
                 else:
-                    # Find which child this is by display number
-                    # This is a bit hacky - we'll use display number to infer
-                    agent_id = f'root_child_{(display_num - 2) // 2}'  # Approximation
+                    agent_id = 'root_child_0'
             else:
-                agent_id = 'root_child_0'  # Fallback
-        else:
-            agent_id = 'root'
+                agent_id = 'root'
 
         # Increment step counter for this agent
         if agent_id not in agent_step_counters:
@@ -164,6 +174,43 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
             'action': action_detail,
             'tool': tool_name,
         }
+
+    # Supplement with direct file reading for agents not in API calls
+    for agent_id, agent_dir in agent_dirs:
+        if agent_id not in agent_steps_map or not agent_steps_map[agent_id]:
+            # Try to read step files directly
+            step_files = sorted(agent_dir.glob('step_*_response.txt'))
+            if step_files:
+                if agent_id not in agent_steps_map:
+                    agent_steps_map[agent_id] = {}
+
+                # Get first step file's mtime as baseline
+                first_mtime = step_files[0].stat().st_mtime if step_files else 0
+
+                for step_file in step_files:
+                    # Extract step number from filename: step_001_response.txt -> 1
+                    match = re.search(r'step_(\d+)_response\.txt', step_file.name)
+                    if not match:
+                        continue
+                    step_num = int(match.group(1))
+
+                    # Read action from response file
+                    try:
+                        content = step_file.read_text(encoding='utf-8', errors='replace').strip()
+                        # Use first 200 chars as action summary
+                        action = content[:200] + ('...' if len(content) > 200 else '')
+                    except:
+                        action = "Step executed"
+
+                    # Use file modification time relative to start
+                    file_mtime = step_file.stat().st_mtime
+                    relative_time = file_mtime - first_mtime if start_time else 0
+
+                    agent_steps_map[agent_id][step_num] = {
+                        'timestamp': relative_time,
+                        'action': action,
+                        'tool': '',
+                    }
 
     # Build agent timeline spans (start/end times)
     agent_timeline = {}
@@ -273,7 +320,7 @@ def generate_trajectory_html(
     forked = result_data.get("forked", num_agents > 1)
 
     # Parse API calls for timing data
-    api_calls = parse_bedrock_api_calls(local_path)
+    api_calls = parse_bedrock_api_calls(local_path, agent_dirs)
     timeline_data = build_timeline_from_api_calls(api_calls, agent_dirs)
 
     agent_timeline = timeline_data['agent_timeline']
@@ -876,11 +923,15 @@ h2 {{
         start_pct = (agent['start'] / total_duration * 100) if total_duration > 0 else 0
         duration_pct = ((agent['end'] - agent['start']) / total_duration * 100) if total_duration > 0 else 0
 
+        # Ensure minimum width for visibility (2% or actual duration, whichever is larger)
+        min_width_pct = 2.0
+        display_width_pct = max(duration_pct, min_width_pct)
+
         is_root = (agent_id == 'root')
         bar_class = 'agent-root' if is_root else 'agent-child'
         top_offset = 0 if is_root else (idx * 24)
 
-        h.append(f"    <div class='timeline-bar {bar_class}' style='left: {start_pct:.1f}%; width: {duration_pct:.1f}%; top: {top_offset}px' title='{esc(agent_id)}'>")
+        h.append(f"    <div class='timeline-bar {bar_class}' style='left: {start_pct:.1f}%; width: {display_width_pct:.1f}%; top: {top_offset}px' title='{esc(agent_id)}'>")
         h.append(f"      <div class='timeline-bar-label'>{esc(agent_id)}</div>")
         h.append("    </div>")
 
