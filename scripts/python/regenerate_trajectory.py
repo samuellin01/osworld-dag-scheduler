@@ -122,6 +122,19 @@ def download_task_from_github(
 
     download_recursive(github_dir, local_dir)
     print(f"✓ Downloaded to {local_dir}")
+
+    # Debug: show directory structure
+    print(f"\nDirectory structure:")
+    for root, dirs, files in os.walk(local_dir):
+        level = root.replace(local_dir, '').count(os.sep)
+        indent = ' ' * 2 * level
+        print(f"{indent}{os.path.basename(root)}/")
+        subindent = ' ' * 2 * (level + 1)
+        for file in files[:3]:  # Show first 3 files per dir
+            print(f"{subindent}{file}")
+        if len(files) > 3:
+            print(f"{subindent}... and {len(files) - 3} more files")
+
     return local_dir
 
 
