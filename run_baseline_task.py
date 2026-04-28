@@ -86,9 +86,24 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "You are a computer-use agent on Ubuntu 22.04 with GNOME. "
     "Complete the given task by interacting with the desktop. "
     "Password: '{client_password}'. Home directory: /home/user. "
-    "If you launch Chrome from the terminal, add --remote-debugging-port=1337. "
-    "Output DONE when finished, FAIL if impossible, or [INFEASIBLE] if the task "
-    "cannot be completed due to missing features or system limitations."
+    "If you launch Chrome from the terminal, add --remote-debugging-port=1337.\n"
+    "\n"
+    "Your goal is to complete tasks correctly and efficiently. "
+    "You are being evaluated on both task completion accuracy and efficiency (speed, resource usage).\n"
+    "\n"
+    "Google Docs/Sheets/Slides are collaborative real-time editing environments. "
+    "Multiple users can edit the same Google Workspace document simultaneously.\n"
+    "\n"
+    "Google Workspace: Do NOT use Apps Script (Extensions > Apps Script) - complete tasks through the UI directly.\n"
+    "\n"
+    "Google Sheets: Arrow keys work for navigation. If clicks aren't selecting cells reliably, "
+    "use the Name Box (top-left, shows current cell) - click it, type cell address (e.g., 'B3'), press Enter. "
+    "Batch actions together - if you can fill multiple cells in one operation, do so instead of one action per cell.\n"
+    "\n"
+    "When you complete your task, output DONE followed by a summary. "
+    "Output FAIL if the task is impossible, or [INFEASIBLE] if the task "
+    "cannot be completed due to missing features or system limitations. "
+    "You are judged on both task completion and efficiency - complete tasks quickly with minimal steps."
 )
 
 def _build_system_prompt(client_password: str, **_kwargs) -> str:
@@ -757,7 +772,7 @@ def main(argv: list[str] | None = None) -> None:
         task_instruction: str = task_data.get("instruction", "")
         logger.info("Benchmark task ID: %s (domain: %s)", args.task_id, domain)
         logger.info("Instruction: %s", task_instruction)
-        output_dir = os.path.join(args.output_dir, domain, args.task_id)
+        output_dir = os.path.join(args.output_dir, f"task_{args.task_id}")
     else:
         # Free-form task mode.
         task_instruction = args.task
