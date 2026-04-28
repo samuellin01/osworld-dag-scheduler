@@ -209,8 +209,7 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
                     # Read action from response file
                     try:
                         content = step_file.read_text(encoding='utf-8', errors='replace').strip()
-                        # Use first 200 chars as action summary
-                        action = content[:200] + ('...' if len(content) > 200 else '')
+                        action = content
                     except:
                         action = "Step executed"
 
