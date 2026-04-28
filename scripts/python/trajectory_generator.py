@@ -29,109 +29,158 @@ def parse_bedrock_api_calls(local_path: pathlib.Path) -> List[Dict]:
 def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[str, pathlib.Path]]) -> Dict:
     """Build timeline data from bedrock API calls with actual timestamps."""
 
-    # Map agent_id to their steps with timestamps
-    agent_timeline = {}
+    # Track steps per agent
     agent_steps_map = {}  # agent_id -> {step_num -> {'timestamp': ..., 'action': ...}}
+    agent_step_counters = {}  # agent_id -> current step number
 
     start_time = None
     end_time = None
 
     for call in api_calls:
-        timestamp_str = call.get('timestamp')
-        if not timestamp_str:
+        # Get timestamps
+        request_ts_str = call.get('request_timestamp')
+        response_ts_str = call.get('response_timestamp')
+
+        if not response_ts_str:
             continue
 
         # Parse ISO timestamp
         try:
-            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            response_ts = datetime.fromisoformat(response_ts_str.replace('Z', '+00:00'))
         except:
             continue
 
         if start_time is None:
-            start_time = ts
-        end_time = ts
+            start_time = response_ts
+        end_time = response_ts
 
-        # Extract agent_id and step info
-        agent_id = call.get('agent_id', 'root')
-        step_num = call.get('step')
+        relative_time = (response_ts - start_time).total_seconds() if start_time else 0
 
-        # Get action details from tool use
+        # Determine agent ID from system prompt
+        request = call.get('request', {})
+        system_prompt = request.get('system_prompt', '')
+        tools = request.get('tools', [])
+
+        # Worker agents have "You are a worker agent" in system prompt
+        # Root has fork_subtask in tools
+        if 'You are a worker agent' in system_prompt:
+            # This is a worker - need to figure out which one
+            # Workers have different display numbers mentioned in system prompt
+            # Look for "chrome_display_2" pattern
+            display_match = re.search(r'chrome_display_(\d+)', system_prompt)
+            if display_match:
+                display_num = int(display_match.group(1))
+                # Map display to agent ID (display 0 = root, display 2+ = workers)
+                if display_num == 0:
+                    agent_id = 'root'
+                else:
+                    # Find which child this is by display number
+                    # This is a bit hacky - we'll use display number to infer
+                    agent_id = f'root_child_{(display_num - 2) // 2}'  # Approximation
+            else:
+                agent_id = 'root_child_0'  # Fallback
+        else:
+            agent_id = 'root'
+
+        # Increment step counter for this agent
+        if agent_id not in agent_step_counters:
+            agent_step_counters[agent_id] = 0
+        agent_step_counters[agent_id] += 1
+        step_num = agent_step_counters[agent_id]
+
+        # Extract action details from response content blocks
         action_detail = ""
         tool_name = ""
 
-        request_body = call.get('request_body', {})
-        messages = request_body.get('messages', [])
+        response = call.get('response', {})
+        content_blocks = response.get('content_blocks', [])
 
-        # Look for tool results in assistant messages
-        for msg in reversed(messages):
-            if msg.get('role') == 'assistant':
-                content = msg.get('content', [])
-                for block in content:
-                    if isinstance(block, dict):
-                        # Tool use block
-                        if block.get('type') == 'tool_use':
-                            tool_name = block.get('name', '')
-                            tool_input = block.get('input', {})
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
 
-                            if tool_name == 'computer_20241022':
-                                action = tool_input.get('action', '')
-                                if action == 'key':
-                                    action_detail = f"Key: {tool_input.get('text', '')}"
-                                elif action == 'type':
-                                    action_detail = f"Type: {tool_input.get('text', '')}"
-                                elif action in ['left_click', 'right_click', 'middle_click', 'double_click']:
-                                    coord = tool_input.get('coordinate', [])
-                                    action_detail = f"{action.replace('_', ' ').title()} at {coord}"
-                                elif action == 'mouse_move':
-                                    coord = tool_input.get('coordinate', [])
-                                    action_detail = f"Move mouse to {coord}"
-                                elif action == 'screenshot':
-                                    action_detail = "Take screenshot"
-                                else:
-                                    action_detail = f"{action}"
-                            elif tool_name == 'bash_20241022':
-                                command = tool_input.get('command', '')
-                                action_detail = f"Bash: {command}"
-                            elif tool_name == 'fork_agent':
-                                child_id = tool_input.get('child_agent_id', '')
-                                task = tool_input.get('task', '')
-                                action_detail = f"Fork {child_id}: {task}"
-                            else:
-                                action_detail = f"{tool_name}"
-                        # Text block
-                        elif block.get('type') == 'text':
-                            text = block.get('text', '')
-                            if len(text) > 200:
-                                action_detail = text[:200] + "..."
-                            else:
-                                action_detail = text
-                            break
-                if action_detail:
-                    break
+            # Text block
+            if block.get('type') == 'text':
+                text = block.get('text', '').strip()
+                if text and not action_detail:
+                    # Use first 200 chars of text
+                    action_detail = text[:200]
 
+            # Tool use block
+            elif block.get('type') == 'tool_use':
+                tool_name = block.get('name', '')
+                tool_input = block.get('input', {})
+
+                if tool_name == 'computer':
+                    action = tool_input.get('action', '')
+                    if action == 'key':
+                        action_detail = f"Key: {tool_input.get('text', '')}"
+                    elif action == 'type':
+                        text = tool_input.get('text', '')
+                        action_detail = f"Type: {text}"
+                    elif action in ['left_click', 'right_click', 'middle_click', 'double_click']:
+                        coord = tool_input.get('coordinate', [])
+                        action_detail = f"{action.replace('_', ' ').title()} at {coord}"
+                    elif action == 'mouse_move':
+                        coord = tool_input.get('coordinate', [])
+                        action_detail = f"Move to {coord}"
+                    elif action == 'screenshot':
+                        action_detail = "Screenshot"
+                    elif action == 'zoom':
+                        region = tool_input.get('region', [])
+                        action_detail = f"Zoom to {region}"
+                    else:
+                        action_detail = f"Computer: {action}"
+
+                elif tool_name == 'bash':
+                    command = tool_input.get('command', '')
+                    if len(command) > 100:
+                        command = command[:100] + "..."
+                    action_detail = f"Bash: {command}"
+
+                elif tool_name == 'fork_subtask':
+                    subtask = tool_input.get('subtask', '')
+                    if len(subtask) > 150:
+                        subtask = subtask[:150] + "..."
+                    action_detail = f"Fork worker: {subtask}"
+
+                elif tool_name == 'peek_child':
+                    child_id = tool_input.get('child_id', '')
+                    action_detail = f"Peek at {child_id}"
+
+                elif tool_name == 'message_child':
+                    child_id = tool_input.get('child_id', '')
+                    message = tool_input.get('message', '')
+                    action_detail = f"Message to {child_id}: {message[:50]}"
+
+                else:
+                    action_detail = f"Tool: {tool_name}"
+
+                # Prefer tool action over text
+                break
+
+        # Store step data
         if agent_id not in agent_steps_map:
             agent_steps_map[agent_id] = {}
 
-        if step_num and step_num not in agent_steps_map[agent_id]:
-            relative_time = (ts - start_time).total_seconds() if start_time else 0
-            agent_steps_map[agent_id][step_num] = {
-                'timestamp': relative_time,
-                'action': action_detail,
-                'tool': tool_name,
-            }
+        agent_steps_map[agent_id][step_num] = {
+            'timestamp': relative_time,
+            'action': action_detail,
+            'tool': tool_name,
+        }
 
-    # Build agent timeline spans
-    for agent_id, agent_dir in agent_dirs:
-        steps = agent_steps_map.get(agent_id, {})
-        if steps:
-            step_nums = sorted(steps.keys())
-            start = steps[step_nums[0]]['timestamp']
-            end = steps[step_nums[-1]]['timestamp']
+    # Build agent timeline spans (start/end times)
+    agent_timeline = {}
+    for agent_id, steps_dict in agent_steps_map.items():
+        if steps_dict:
+            step_nums = sorted(steps_dict.keys())
+            start = steps_dict[step_nums[0]]['timestamp']
+            end = steps_dict[step_nums[-1]]['timestamp']
 
             agent_timeline[agent_id] = {
                 'start': start,
                 'end': end,
-                'steps': steps,
+                'steps': steps_dict,
             }
 
     total_duration = (end_time - start_time).total_seconds() if start_time and end_time else 0
@@ -414,6 +463,7 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
     background: #0d1117;
     border-radius: 4px;
     font-family: 'SF Mono', Monaco, monospace;
+    word-wrap: break-word;
 }
 
 /* Action Log */
@@ -445,6 +495,7 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
 }
 .action-detail {
     color: #e6edf3;
+    word-wrap: break-word;
 }
 
 /* Tabs */
