@@ -103,8 +103,8 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
             if block.get('type') == 'text':
                 text = block.get('text', '').strip()
                 if text and not action_detail:
-                    # Use first 200 chars of text
-                    action_detail = text[:200]
+                    # Use full text (no truncation)
+                    action_detail = text
 
             # Tool use block
             elif block.get('type') == 'tool_use':
@@ -134,14 +134,10 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
 
                 elif tool_name == 'bash':
                     command = tool_input.get('command', '')
-                    if len(command) > 100:
-                        command = command[:100] + "..."
                     action_detail = f"Bash: {command}"
 
                 elif tool_name == 'fork_subtask':
                     subtask = tool_input.get('subtask', '')
-                    if len(subtask) > 150:
-                        subtask = subtask[:150] + "..."
                     action_detail = f"Fork worker: {subtask}"
 
                 elif tool_name == 'peek_child':
@@ -151,7 +147,7 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
                 elif tool_name == 'message_child':
                     child_id = tool_input.get('child_id', '')
                     message = tool_input.get('message', '')
-                    action_detail = f"Message to {child_id}: {message[:50]}"
+                    action_detail = f"Message to {child_id}: {message}"
 
                 else:
                     action_detail = f"Tool: {tool_name}"
@@ -190,6 +186,35 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
         'agent_steps_map': agent_steps_map,
         'total_duration': total_duration,
     }
+
+
+def calculate_cost_from_tokens(local_path: pathlib.Path) -> float:
+    """Calculate cost from token_usage.json using Opus 4 pricing."""
+    token_usage_path = local_path / "token_usage.json"
+    if not token_usage_path.is_file():
+        return 0.0
+
+    try:
+        with open(token_usage_path, 'r', encoding='utf-8') as f:
+            usage = json.load(f)
+
+        # Opus 4.6 pricing (as of early 2026)
+        # Input: $15 per million tokens
+        # Output: $75 per million tokens
+        input_tokens = usage.get('input_tokens', 0)
+        output_tokens = usage.get('output_tokens', 0)
+        cache_read_tokens = usage.get('cache_read_input_tokens', 0)
+
+        # Cache read is cheaper: $1.50 per million
+        input_cost = (input_tokens / 1_000_000) * 15.0
+        cache_cost = (cache_read_tokens / 1_000_000) * 1.5
+        output_cost = (output_tokens / 1_000_000) * 75.0
+
+        total_cost = input_cost + cache_cost + output_cost
+        return total_cost
+
+    except (json.JSONDecodeError, OSError):
+        return 0.0
 
 
 def generate_trajectory_html(
@@ -266,6 +291,9 @@ def generate_trajectory_html(
     agent_timeline = timeline_data['agent_timeline']
     agent_steps_map = timeline_data['agent_steps_map']
     total_duration = timeline_data['total_duration'] or duration
+
+    # Calculate cost from token usage
+    cost = calculate_cost_from_tokens(local_path)
 
     # -- Helper -------------------------------------------------------------
 
@@ -347,184 +375,321 @@ def generate_trajectory_html(
     h.append("<head>")
     h.append("<meta charset='utf-8'>")
     h.append(f"<title>Trajectory — {esc(task_id)}</title>")
+    # Calculate timeline height based on number of agents
+    timeline_height = 40 + max(0, (total_agents - 1)) * 24
+
     h.append("<style>")
-    h.append("""
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-       background: #0d1117; color: #e6edf3; padding: 24px; line-height: 1.6; }
-h1 { font-size: 1.4em; margin-bottom: 8px; color: #f0f6fc; }
-h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
-.meta { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 20px;
-        font-size: 0.85em; color: #b1bac4; }
-.meta span { background: #161b22; padding: 4px 10px; border-radius: 6px; }
-.meta strong { color: #e6edf3; }
-.score-pass { color: #56d364; } .score-fail { color: #f85149; }
+    h.append(f"""
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    padding: 24px;
+    line-height: 1.6;
+}}
+h1 {{
+    font-size: 1.6em;
+    margin-bottom: 12px;
+    color: #f0f6fc;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}}
+h2 {{
+    font-size: 1.1em;
+    margin: 32px 0 16px 0;
+    color: #f0f6fc;
+    border-bottom: 2px solid #21262d;
+    padding-bottom: 8px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}}
+.meta {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+    font-size: 0.9em;
+}}
+.meta span {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid #30363d;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}}
+.meta strong {{ color: #e6edf3; font-weight: 600; }}
+.score-pass {{ color: #3fb950; font-weight: 700; }}
+.score-fail {{ color: #f85149; font-weight: 700; }}
 
 /* Timeline Scrubber */
-.timeline-scrubber {
-    background: #161b22;
+.timeline-scrubber {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
     border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 16px;
-    margin-bottom: 24px;
-}
-.timeline-header {
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 28px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}}
+.timeline-header {{
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
-}
-.timeline-time {
-    font-size: 1.1em;
-    color: #58a6ff;
-    font-weight: 600;
-}
-.timeline-track-container {
     margin-bottom: 16px;
-}
-.timeline-slider {
+}}
+.timeline-time {{
+    font-size: 1.4em;
+    background: linear-gradient(90deg, #58a6ff 0%, #79c0ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}}
+.timeline-track-container {{
+    margin-bottom: 20px;
+}}
+.timeline-slider {{
     width: 100%;
-    height: 8px;
+    height: 20px;
     background: #0d1117;
-    border-radius: 4px;
+    border-radius: 10px;
     position: relative;
     cursor: pointer;
-    margin-bottom: 8px;
-}
-.timeline-progress {
+    margin-bottom: 16px;
+    border: 1px solid #21262d;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+}}
+.timeline-progress {{
     height: 100%;
     background: linear-gradient(90deg, #58a6ff 0%, #1f6feb 100%);
-    border-radius: 4px;
+    border-radius: 10px;
     position: absolute;
-    pointer-events: none;
-}
-.timeline-bars {
+    transition: width 0.1s ease-out;
+    box-shadow: 0 0 8px rgba(88, 166, 255, 0.4);
+}}
+.timeline-knob {{
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    background: linear-gradient(135deg, #58a6ff 0%, #1f6feb 100%);
+    border: 3px solid #0d1117;
+    border-radius: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    cursor: grab;
+    box-shadow: 0 2px 8px rgba(88, 166, 255, 0.6), 0 0 0 4px rgba(88, 166, 255, 0.1);
+    transition: transform 0.2s, box-shadow 0.2s;
+}}
+.timeline-knob:hover {{
+    transform: translate(-50%, -50%) scale(1.1);
+    box-shadow: 0 4px 12px rgba(88, 166, 255, 0.8), 0 0 0 6px rgba(88, 166, 255, 0.15);
+}}
+.timeline-knob:active {{
+    cursor: grabbing;
+    transform: translate(-50%, -50%) scale(0.95);
+}}
+.timeline-bars {{
     position: relative;
-    height: 40px;
-    margin-top: 8px;
-}
-.timeline-bar {
+    height: {timeline_height}px;
+    margin-top: 12px;
+}}
+.timeline-bar {{
     position: absolute;
-    height: 16px;
-    border-radius: 4px;
+    height: 20px;
+    border-radius: 6px;
     cursor: pointer;
-}
-.timeline-bar.agent-root {
+    transition: transform 0.2s, box-shadow 0.2s;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.timeline-bar:hover {{
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}}
+.timeline-bar.agent-root {{
     background: linear-gradient(90deg, #3fb950 0%, #2ea043 100%);
+    box-shadow: 0 2px 8px rgba(63, 185, 80, 0.3);
     top: 0;
-}
-.timeline-bar.agent-child {
+}}
+.timeline-bar.agent-child {{
     background: linear-gradient(90deg, #58a6ff 0%, #1f6feb 100%);
-}
-.timeline-bar-label {
+    box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
+}}
+.timeline-bar-label {{
     position: absolute;
     font-size: 0.7em;
     color: #fff;
-    padding: 2px 6px;
+    padding: 2px 8px;
     white-space: nowrap;
     pointer-events: none;
-}
+    font-weight: 600;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}}
+.timeline-playhead {{
+    position: absolute;
+    width: 2px;
+    height: 100%;
+    background: #f85149;
+    top: 0;
+    pointer-events: none;
+    box-shadow: 0 0 8px rgba(248, 81, 73, 0.8);
+    transition: left 0.1s ease-out;
+}}
+.timeline-playhead::before {{
+    content: '';
+    position: absolute;
+    top: -4px;
+    left: -3px;
+    width: 8px;
+    height: 8px;
+    background: #f85149;
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(248, 81, 73, 1);
+}}
 
 /* Display Panels */
-.display-panels {
+.display-panels {{
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-}
-.display-panel {
-    background: #161b22;
+    grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+    gap: 20px;
+    margin-bottom: 28px;
+}}
+.display-panel {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
     border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 12px;
-}
-.display-panel-header {
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    transition: transform 0.2s, box-shadow 0.2s;
+}}
+.display-panel:hover {{
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+}}
+.display-panel-header {{
     font-size: 0.9em;
     color: #b1bac4;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
     display: flex;
     justify-content: space-between;
-}
-.display-panel-step {
+    align-items: center;
+}}
+.display-panel-header strong {{
+    color: #58a6ff;
+    font-weight: 600;
+}}
+.display-panel-step {{
     font-size: 0.75em;
     color: #8b949e;
-}
-.display-panel img {
+    font-variant-numeric: tabular-nums;
+}}
+.display-panel img {{
     width: 100%;
     height: auto;
-    border-radius: 4px;
+    border-radius: 8px;
     border: 1px solid #30363d;
-}
-.display-panel-action {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}}
+.display-panel-action {{
     font-size: 0.8em;
     color: #e6edf3;
-    margin-top: 8px;
-    padding: 8px;
+    margin-top: 12px;
+    padding: 10px;
     background: #0d1117;
-    border-radius: 4px;
-    font-family: 'SF Mono', Monaco, monospace;
+    border-radius: 6px;
+    font-family: 'SF Mono', Monaco, 'Courier New', monospace;
     word-wrap: break-word;
-}
+    border: 1px solid #21262d;
+    line-height: 1.5;
+}}
 
 /* Action Log */
-.action-log {
-    background: #161b22;
+.action-log {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
     border: 1px solid #30363d;
-    border-radius: 6px;
+    border-radius: 12px;
     padding: 16px;
-    max-height: 500px;
+    max-height: 600px;
     overflow-y: auto;
-}
-.action-item {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}}
+.action-log::-webkit-scrollbar {{
+    width: 12px;
+}}
+.action-log::-webkit-scrollbar-track {{
+    background: #0d1117;
+    border-radius: 6px;
+}}
+.action-log::-webkit-scrollbar-thumb {{
+    background: #30363d;
+    border-radius: 6px;
+    border: 2px solid #0d1117;
+}}
+.action-log::-webkit-scrollbar-thumb:hover {{
+    background: #484f58;
+}}
+.action-item {{
     display: grid;
-    grid-template-columns: 80px 120px 1fr;
-    gap: 12px;
-    padding: 8px;
+    grid-template-columns: 90px 140px 1fr;
+    gap: 16px;
+    padding: 10px;
     border-bottom: 1px solid #21262d;
     font-size: 0.85em;
-}
-.action-item:last-child {
+    transition: background 0.15s;
+}}
+.action-item:hover {{
+    background: rgba(56, 139, 253, 0.05);
+}}
+.action-item:last-child {{
     border-bottom: none;
-}
-.action-time {
+}}
+.action-time {{
     color: #8b949e;
     font-family: 'SF Mono', Monaco, monospace;
-}
-.action-agent {
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+}}
+.action-agent {{
     color: #79c0ff;
-}
-.action-detail {
+    font-weight: 600;
+}}
+.action-detail {{
     color: #e6edf3;
     word-wrap: break-word;
-}
+    line-height: 1.5;
+}}
 
 /* Tabs */
-.tabs {
+.tabs {{
     display: flex;
-    gap: 8px;
+    gap: 4px;
     margin-bottom: 16px;
-    border-bottom: 1px solid #30363d;
-}
-.tab {
-    padding: 8px 16px;
+    border-bottom: 2px solid #21262d;
+}}
+.tab {{
+    padding: 10px 18px;
     cursor: pointer;
     color: #8b949e;
-    border-bottom: 2px solid transparent;
+    border-bottom: 3px solid transparent;
     transition: all 0.2s;
-}
-.tab:hover {
+    font-weight: 500;
+    border-radius: 6px 6px 0 0;
+}}
+.tab:hover {{
     color: #e6edf3;
-}
-.tab.active {
+    background: rgba(56, 139, 253, 0.05);
+}}
+.tab.active {{
     color: #58a6ff;
     border-bottom-color: #58a6ff;
-}
-.tab-content {
+    background: rgba(56, 139, 253, 0.08);
+}}
+.tab-content {{
     display: none;
-}
-.tab-content.active {
+}}
+.tab-content.active {{
     display: block;
-}
+}}
 """)
     h.append("</style>")
     h.append("</head>")
@@ -536,7 +701,6 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
 
     # Meta info
     score_class = "score-pass" if score_str not in ["N/A", "0", "0.0"] else "score-fail"
-    cost = result_data.get("cost", 0)
     h.append("<div class='meta'>")
     h.append(f"  <span>Score: <strong class='{score_class}'>{esc(score_str)}</strong></span>")
     h.append(f"  <span>Duration: <strong>{fmt_duration(duration)}</strong></span>")
@@ -554,8 +718,9 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
     h.append("  <div class='timeline-track-container'>")
     h.append("    <div class='timeline-slider' id='timeline-slider'>")
     h.append("      <div class='timeline-progress' id='timeline-progress' style='width: 0%'></div>")
+    h.append("      <div class='timeline-knob' id='timeline-knob' style='left: 0%'></div>")
     h.append("    </div>")
-    h.append("    <div class='timeline-bars'>")
+    h.append("    <div class='timeline-bars' id='timeline-bars'>")
 
     # Timeline bars for each agent
     for idx, agent in enumerate(agent_data):
@@ -565,12 +730,13 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
 
         is_root = (agent_id == 'root')
         bar_class = 'agent-root' if is_root else 'agent-child'
-        top_offset = 0 if is_root else (idx * 20)
+        top_offset = 0 if is_root else (idx * 24)
 
         h.append(f"    <div class='timeline-bar {bar_class}' style='left: {start_pct:.1f}%; width: {duration_pct:.1f}%; top: {top_offset}px' title='{esc(agent_id)}'>")
         h.append(f"      <div class='timeline-bar-label'>{esc(agent_id)}</div>")
         h.append("    </div>")
 
+    h.append("      <div class='timeline-playhead' id='timeline-playhead' style='left: 0%'></div>")
     h.append("    </div>")
     h.append("  </div>")
     h.append("</div>")
@@ -622,6 +788,7 @@ h2 { font-size: 1.2em; margin: 24px 0 12px 0; color: #f0f6fc; border-bottom: 1px
 
     h.append("""
 let currentTime = 0;
+let isDragging = false;
 
 function updateDisplays(time) {
     currentTime = time;
@@ -631,9 +798,11 @@ function updateDisplays(time) {
     const secs = Math.floor(time % 60);
     document.getElementById('timeline-time').textContent = mins + ':' + (secs < 10 ? '0' : '') + secs;
 
-    // Update progress bar
+    // Update progress bar and knob
     const progress = (time / totalDuration) * 100;
     document.getElementById('timeline-progress').style.width = progress + '%';
+    document.getElementById('timeline-knob').style.left = progress + '%';
+    document.getElementById('timeline-playhead').style.left = progress + '%';
 
     // Update each agent display
     agentData.forEach(agent => {
@@ -672,16 +841,56 @@ function updateDisplays(time) {
 
 // Timeline slider interaction
 const slider = document.getElementById('timeline-slider');
-slider.addEventListener('click', (e) => {
+const knob = document.getElementById('timeline-knob');
+
+function seekToPosition(clientX) {
     const rect = slider.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
     const percent = x / rect.width;
     const time = percent * totalDuration;
     updateDisplays(time);
+}
+
+// Click on slider
+slider.addEventListener('click', (e) => {
+    if (e.target === slider || e.target === document.getElementById('timeline-progress')) {
+        seekToPosition(e.clientX);
+    }
 });
 
-// Initialize at t=0
-updateDisplays(0);
+// Drag knob
+knob.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (isDragging) {
+        seekToPosition(e.clientX);
+    }
+});
+
+document.addEventListener('mouseup', () => {
+    isDragging = false;
+});
+
+// Keyboard navigation
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft') {
+        updateDisplays(Math.max(0, currentTime - 5));
+    } else if (e.key === 'ArrowRight') {
+        updateDisplays(Math.min(totalDuration, currentTime + 5));
+    } else if (e.key === 'Home') {
+        updateDisplays(0);
+    } else if (e.key === 'End') {
+        updateDisplays(totalDuration);
+    }
+});
+
+// Initialize at first step of first agent
+if (agentData.length > 0 && agentData[0].steps.length > 0) {
+    updateDisplays(agentData[0].steps[0].timestamp);
+}
 
 function showTab(tabName) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
