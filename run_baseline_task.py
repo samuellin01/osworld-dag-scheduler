@@ -743,6 +743,10 @@ def run_task(
         logger.warning("Reached max steps (%d) without DONE/FAIL.", max_steps)
         _save_action_log(output_dir, action_log)
 
+    # Stop wall clock timer BEFORE evaluation (for fairness with parallel timing)
+    wall_clock_seconds = round(time.monotonic() - wall_clock_start, 3)
+    logger.info("Wall-clock time (agent execution only): %.1fs", wall_clock_seconds)
+
     # Evaluate the benchmark result if a task config was provided.
     score: Optional[float] = None
     if task_config is not None:
@@ -758,8 +762,6 @@ def run_task(
                 json.dump(env.last_eval_details, fh, indent=2, default=str, ensure_ascii=False)
 
     # Log and save token usage summary.
-    wall_clock_seconds = round(time.monotonic() - wall_clock_start, 3)
-    logger.info("Wall-clock time: %.1fs", wall_clock_seconds)
     if hasattr(bedrock, "get_token_usage"):
         token_usage = bedrock.get_token_usage()
         token_usage["wall_clock_seconds"] = wall_clock_seconds
