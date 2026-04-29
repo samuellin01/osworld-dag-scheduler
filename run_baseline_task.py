@@ -643,8 +643,12 @@ def run_task(
             with open(os.path.join(step_dir, "action.py"), "w", encoding="utf-8") as fh:
                 fh.write(action_code)
 
+        # Record relative timestamp for this step
+        step_timestamp = round(time.monotonic() - wall_clock_start, 3)
+
         action_log.append({
             "step": step,
+            "timestamp": step_timestamp,
             "actions": actions,
             "action_code": action_code,
             "response_text": response_text[:500],
