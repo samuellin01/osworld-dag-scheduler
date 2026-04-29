@@ -1,0 +1,39 @@
+{
+  "id": "030eeff7-collaborative",
+  "snapshot": "collaborative",
+  "instruction": "Can you enable the 'Do Not Track' feature in Chrome to enhance my online privacy?",
+  "source": "https://www.surreycc.gov.uk/website/cookies/do-not-track",
+  "config": [],
+  "trajectory": "trajectories/",
+  "related_apps": [
+    "chrome"
+  ],
+  "evaluator": {
+    "postconfig": [
+      {
+        "type": "sleep",
+        "parameters": {
+          "seconds": 2.0
+        }
+      }
+    ],
+    "func": "exact_match",
+    "result": {
+      "type": "enable_do_not_track"
+    },
+    "expected": {
+      "type": "rule",
+      "rules": {
+        "expected": "true"
+      }
+    }
+  },
+  "tags": [
+    "chrome",
+    "privacy_settings",
+    "simple_task"
+  ],
+  "proxy": false,
+  "fixed_ip": false,
+  "possibility_of_env_change": "low"
+}
