@@ -251,12 +251,21 @@
       "status": "active",
       "baseline_time_seconds": null,
       "description": "Align textboxes on slides 3/4/5 (right/center/left) in Google Slides"
+    },
+    "030eeff7-collaborative": {
+      "name": "chrome_do_not_track",
+      "osworld_original": "030eeff7-b492-4218-b312-701ec99ee0cc",
+      "config_file": "tasks/030eeff7-collaborative.json",
+      "type": "chrome",
+      "status": "active",
+      "baseline_time_seconds": null,
+      "description": "Enable 'Do Not Track' privacy feature in Chrome settings"
     }
   },
   "metadata": {
     "version": "1.0",
     "created": "2026-04-23",
-    "updated": "2026-04-24",
-    "total_tasks": 27
+    "updated": "2026-04-28",
+    "total_tasks": 28
   }
 }
