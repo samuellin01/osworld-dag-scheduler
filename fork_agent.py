@@ -460,14 +460,6 @@ def run_fork_agent(
         "\n"
     )
 
-    if not parent_id:
-        # Only root agents can instruct about shared filesystem
-        system_prompt += (
-            "**Shared filesystem**: All agents share /tmp on the VM. Workers have separate clipboards, so for transferring "
-            "large/complex content between workers or displays, you can instruct them to write to /tmp files.\n"
-            "\n"
-        )
-
     system_prompt += "\n\n"
 
     system_prompt += (
