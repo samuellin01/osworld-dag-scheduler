@@ -432,7 +432,8 @@ def run_fork_agent(
     system_prompt += (
         "Google Docs/Sheets/Slides are collaborative real-time editing environments. Multiple agents can open "
         "the same Google Workspace URL simultaneously and see each other's changes live - like a team collaborating "
-        "on a shared document. Use this for parallel work on the same file.\n"
+        "on a shared document. Use this for parallel work on the same file. When forking multiple workers to edit "
+        "the same doc, specify which section/location each worker should edit to avoid conflicts.\n"
         "\n"
         "Google Workspace: Do NOT use Apps Script (Extensions > Apps Script) - complete tasks through the UI directly.\n"
         "\n"
