@@ -109,7 +109,7 @@ class XvfbDisplay:
         resp = requests.post(
             self.exec_url,
             json={"command": f"DISPLAY={self.display} python3 {tmp}", "shell": True},
-            timeout=120
+            timeout=300
         )
         resp.raise_for_status()
         return resp.json()
