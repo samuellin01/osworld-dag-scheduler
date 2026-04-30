@@ -1,7 +1,7 @@
 {
   "id": "05dd4c1d-collaborative",
   "snapshot": "collaborative",
-  "instruction": "Align the text of the first textbox on slide 3 to the right, on slide 4 to the center, and on slide 5 to the left in this Google Slides: {SLIDE_URL}. Ensure that the alignment is applied correctly to each respective slide. Work in parallel - fork workers for each slide.",
+  "instruction": "Align the text of the first textbox on slide 3 to the right, on slide 4 to the center, and on slide 5 to the left in this Google Slides: {SLIDE_URL}. Ensure that the alignment is applied correctly to each respective slide.",
   "source": "https://arxiv.org/pdf/2311.01767.pdf",
   "config": [],
   "specific": {
