@@ -1,12 +1,19 @@
-"""Worker execution for DAG scheduler nodes.
+"""Worker execution for DAG scheduler nodes (spec §3).
 
-Each worker owns one display. It receives a coarse subtask and either:
-1. Runs a CUA agent loop directly (screenshot → LLM → action → repeat)
-2. Decomposes the subtask into a fine-grained action plan, then executes
-   each action sequentially on its display
+Each worker is assigned a node and a display slot. Before executing, it
+decides: decompose further or execute directly.
 
-Both paths use the same display — sub-actions don't get separate displays.
-Parallelism comes from multiple workers on different displays.
+  - DECOMPOSE: produce a sub-DAG via the planner, report it back to the
+    scheduler (which merges it into the global DAG and frees this slot).
+    The sub-nodes will be scheduled to (potentially different) slots.
+
+  - EXECUTE: run a CUA agent loop on this display to complete the task.
+    This is the leaf-level execution — the agent sees screenshots and
+    issues computer-use actions until the subtask is done.
+
+The decompose-or-execute decision follows the spec's "atomic detection":
+ask the LLM if this task can be done directly, or needs to be broken up.
+Nodes at max_depth always execute directly.
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import anthropic
 
@@ -24,11 +31,15 @@ from agent_utils import COMPUTER_USE_TOOL, _resize_screenshot, parse_computer_us
 from dag_core import DAGNode
 from fork_agent import XvfbDisplay
 
+if TYPE_CHECKING:
+    from dag_core import DAGScheduler
+
 logger = logging.getLogger(__name__)
 
 
 def run_dag_worker(
     node: DAGNode,
+    scheduler: "DAGScheduler",
     vm_ip: str,
     server_port: int,
     bedrock: Any,
@@ -36,30 +47,44 @@ def run_dag_worker(
     output_dir: str,
     password: str = "osworld-public-evaluation",
     dependency_results: Optional[Dict[str, Any]] = None,
-    max_depth: int = 3,
-) -> Dict[str, Any]:
-    """Execute a coarse DAG node on its assigned display.
+) -> Optional[Dict[str, Any]]:
+    """Execute a single DAG node on its assigned slot.
 
-    The worker decides whether to:
-    - Run a CUA agent loop (for tasks requiring visual feedback / adaptation)
-    - Decompose into a fine action plan and execute sequentially (when steps are known)
-
-    In practice, most tasks benefit from the CUA agent loop since the agent
-    needs to see the screen to determine coordinates and adapt to UI state.
-    Decomposition into a fine plan is useful when the exact action sequence
-    is predictable (e.g., fill specific cells with known values).
+    Returns the result dict if executed directly, or None if expanded
+    (expansion is reported to the scheduler directly).
     """
     tag = f"[{node.id}]"
-    logger.info("%s Starting worker (depth=%d, display=:%s)", tag, node.depth, node.display_num)
+    max_depth = scheduler.dag.max_depth
+    logger.info("%s Starting (depth=%d/%d, display=:%s)", tag, node.depth, max_depth, node.display_num)
 
-    # For now, always use CUA agent loop — the agent sees the screen
-    # and decides what to do. Fine-grained action plans require knowing
-    # exact coordinates which we don't have until we see the screenshot.
-    #
-    # Future: if should_decompose() returns True AND we have a way to
-    # resolve "click the Name Box" → actual coordinates, we can use
-    # plan_fine_actions() here. For now, the CUA loop handles it.
+    # Decide: decompose or execute (spec §3 step 1)
+    if node.depth < max_depth:
+        from dag_planner import should_decompose
+        context = _format_dep_results(dependency_results)
 
+        if should_decompose(
+            task_description=node.task_description,
+            bedrock=bedrock,
+            model=model,
+            context=context,
+            max_steps=node.max_steps,
+        ):
+            # Decompose path (spec §3 step 2a)
+            logger.info("%s Decomposing (depth %d < max %d)", tag, node.depth, max_depth)
+            from dag_planner import plan_dag
+            sub_plan = plan_dag(
+                task_description=node.task_description,
+                bedrock=bedrock,
+                model=model,
+                context=context,
+            )
+            # Report expansion back to scheduler — it handles merging
+            # into the global DAG and freeing this slot (spec §4)
+            scheduler.report_expansion(node.id, sub_plan)
+            return None  # Signal that we expanded, not executed
+
+    # Execute path (spec §3 step 2b) — run CUA agent on this display
+    logger.info("%s Executing directly (CUA agent loop)", tag)
     return _run_cua_agent(
         node=node,
         vm_ip=vm_ip,
@@ -101,7 +126,8 @@ def _build_worker_system_prompt(
         "You are a worker agent assigned a specific subtask. Your display has been prepared "
         "with the necessary applications. Focus on completing your subtask efficiently.\n"
         "\n"
-        "When done, output SUBTASK COMPLETE followed by a summary of what you accomplished.\n"
+        "When done, output SUBTASK COMPLETE followed by a summary of what you accomplished "
+        "and any key results (data values, findings, etc.) that downstream tasks may need.\n"
         "If you cannot complete the task, output SUBTASK FAILED with explanation.\n"
         "\n"
         "**If setup failed** - If your first screenshot shows an empty desktop or wrong app:\n"
@@ -142,11 +168,7 @@ def _run_cua_agent(
     password: str,
     dependency_results: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Run a CUA agent loop: screenshot → LLM → action → repeat.
-
-    The agent sees the screen each step and decides what to do.
-    This is the standard computer-use agent pattern.
-    """
+    """Run a CUA agent loop on the assigned display until subtask is done."""
     tag = f"[{node.id}]"
     display_num = node.display_num or 0
     display = XvfbDisplay(vm_ip, server_port, display_num)
@@ -283,17 +305,12 @@ def _run_cua_agent(
             if re.search(r'\bSUBTASK\s+COMPLETE\b', line, re.IGNORECASE):
                 logger.info("%s SUBTASK COMPLETE at step %d", tag, step)
                 completion_time = time.time()
-                duration = completion_time - start_time
-                result = {
+                return {
                     "status": "DONE",
                     "summary": final_response_text,
                     "steps_used": step,
-                    "duration": duration,
+                    "duration": completion_time - start_time,
                 }
-                if output_dir:
-                    with open(os.path.join(output_dir, "completion_timestamp.txt"), "w") as f:
-                        f.write(f"{completion_time:.6f}\n")
-                return result
 
             if re.search(r'\bSUBTASK\s+FAILED\b', line, re.IGNORECASE):
                 logger.info("%s SUBTASK FAILED at step %d", tag, step)
