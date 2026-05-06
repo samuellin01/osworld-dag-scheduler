@@ -48,20 +48,24 @@ class DisplayPool:
         pool.cleanup()
     """
 
-    def __init__(self, vm_exec, num_displays: int = 8, password: str = "password"):
+    def __init__(self, vm_exec, num_displays: int = 8, password: str = "password",
+                 include_primary: bool = False):
         """Initialize display pool.
 
         Args:
             vm_exec: Function to execute commands on VM (cmd: str) -> dict
             num_displays: Number of displays to create (default 8)
             password: Sudo password for VM
+            include_primary: If True, include display :0 (the primary desktop)
+                in the pool. Display :0 is already running so no Xvfb is started.
+                Useful when env.reset() sets up state on :0 that agents need.
         """
         self.vm_exec = vm_exec
         self.password = password
         self.num_displays = num_displays
+        self.include_primary = include_primary
 
         # Display numbers: 2, 3, 4, ..., num_displays+1
-        # (Skip 0=primary, 1=convention)
         self.display_nums = list(range(2, num_displays + 2))
 
         # Track display state
@@ -69,6 +73,10 @@ class DisplayPool:
             n: Display(display_num=n, status=DisplayStatus.INITIALIZING)
             for n in self.display_nums
         }
+
+        # Add primary display :0 if requested (already running, no Xvfb needed)
+        if include_primary:
+            self.displays[0] = Display(display_num=0, status=DisplayStatus.INITIALIZING)
 
         # Thread safety
         self._lock = threading.Lock()
@@ -119,7 +127,14 @@ class DisplayPool:
         else:
             logger.info("✓ Openbox shortcuts configured (Ctrl+Alt+T=xterm)")
 
-        # Start each display
+        # Mark primary display :0 as ready (already running, no Xvfb needed)
+        if self.include_primary:
+            with self._lock:
+                self.displays[0].status = DisplayStatus.IDLE
+                self.idle_displays.add(0)
+            logger.info("✓ Display :0 (primary) added to pool")
+
+        # Start each virtual display
         success_count = 0
         for display_num in self.display_nums:
             if self._start_display(display_num):
@@ -127,7 +142,8 @@ class DisplayPool:
             else:
                 logger.warning(f"Failed to start display :{display_num}")
 
-        logger.info(f"Successfully initialized {success_count}/{self.num_displays} displays")
+        total = success_count + (1 if self.include_primary else 0)
+        logger.info(f"Successfully initialized {total} displays ({success_count} virtual + {1 if self.include_primary else 0} primary)")
         return success_count == self.num_displays
 
     def _start_display(self, display_num: int) -> bool:
