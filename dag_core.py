@@ -162,8 +162,14 @@ Update your assessment and decide on action:
 1. Write your updated assessment:
 ASSESSMENT
 work_completed: <what the worker has done so far>
-work_remaining: <what's left within THIS worker's task>
-estimated_remaining_steps: <number>
+remaining_actions: <list the concrete CUA actions still needed, one per line, \
+with estimated action count for each. Mark any work delegated to a helper as \
+SKIP. Example:
+  - scroll down to see remaining questions (1-2 actions)
+  - compile answers (1 action)
+  - Test 3: SKIP — helper_1 is handling this
+  - signal results (1 action)
+  total: ~4 actions>
 pace_notes: <observations about speed or struggles>
 
 2. Decide on action:
@@ -362,28 +368,38 @@ class Manager:
 
             # Parse and log structured predictions
             work_completed = ""
-            work_remaining = ""
-            est_steps = ""
+            remaining_actions = []
+            total_est = ""
             pace_notes = ""
+            in_remaining = False
             for line in assessment_lines:
                 if line.startswith("work_completed:"):
                     work_completed = line[len("work_completed:"):].strip()
-                elif line.startswith("work_remaining:"):
-                    work_remaining = line[len("work_remaining:"):].strip()
-                elif line.startswith("estimated_remaining_steps:"):
-                    est_steps = line[len("estimated_remaining_steps:"):].strip()
+                    in_remaining = False
+                elif line.startswith("remaining_actions:"):
+                    in_remaining = True
                 elif line.startswith("pace_notes:"):
                     pace_notes = line[len("pace_notes:"):].strip()
+                    in_remaining = False
+                elif in_remaining:
+                    if line.startswith("total:"):
+                        total_est = line[len("total:"):].strip()
+                        in_remaining = False
+                    elif line.startswith("- "):
+                        remaining_actions.append(line[2:].strip())
 
             est_time = ""
             try:
-                est_time = f" (~{int(est_steps) * avg_step_time:.0f}s)" if est_steps and avg_step_time > 0 else ""
+                num = "".join(c for c in total_est if c.isdigit())
+                if num and avg_step_time > 0:
+                    est_time = f" (~{int(num) * avg_step_time:.0f}s)"
             except (ValueError, TypeError):
                 pass
 
-            logger.info("%s Assessment: done=[%s] remaining=[%s] est_steps=%s%s pace=[%s]",
-                         tag, work_completed[:60], work_remaining[:60],
-                         est_steps, est_time, pace_notes[:60])
+            actions_str = " | ".join(remaining_actions[:5]) if remaining_actions else "(none)"
+            logger.info("%s Assessment: done=[%s] actions=[%s] est=%s%s pace=[%s]",
+                         tag, work_completed[:60], actions_str[:120],
+                         total_est, est_time, pace_notes[:60])
 
         if "SPAWN_HELPER" in response:
             if len(self._helpers_spawned) >= MAX_HELPERS_PER_MANAGER:
