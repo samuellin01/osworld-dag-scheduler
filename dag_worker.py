@@ -66,11 +66,15 @@ def run_phase(
     resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
     is_continuation = phase_index > 0
 
-    initial_text = (
-        f"Continue on the same display. Your current phase:\n{phase.task}"
-        if is_continuation else
-        f"Your task:\n{phase.task}"
-    )
+    if is_continuation:
+        initial_text = f"Continue on the same display. Your current phase:\n{phase.task}"
+        prev_phase = agent.phases[phase_index - 1]
+        if prev_phase.result and prev_phase.result.get("summary"):
+            initial_text += f"\n\nContext from your previous phase ({prev_phase.id}):\n"
+            initial_text += prev_phase.result["summary"][:2000]
+            initial_text += "\n\nThe display state carries over — do NOT redo work from the previous phase."
+    else:
+        initial_text = f"Your task:\n{phase.task}"
 
     if signal_data:
         initial_text += "\n\nData from other agents:\n"
