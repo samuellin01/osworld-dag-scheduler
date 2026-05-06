@@ -1,16 +1,21 @@
 """Per-phase CUA agent execution for the signal/await orchestrator.
 
 Each agent runs its phases sequentially on the same display. A phase
-is a CUA loop (screenshot → LLM → action → repeat) that ends when
-the agent says PHASE COMPLETE or SUBTASK COMPLETE.
+is a CUA loop (screenshot -> LLM -> action -> repeat) with two extra
+tools alongside computer-use:
 
-Signal coordination is handled by the Orchestrator. This module only
-handles the CUA execution within a single phase.
+  await_signal(name) — blocks mid-loop until another agent's data arrives.
+    The agent does independent work first, then calls this when it actually
+    needs the data. No artificial phase splitting required.
+
+  request_help(task) — spawns a helper agent on a free display. The agent
+    continues its own work while the helper runs in parallel.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
@@ -20,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import anthropic
 
 from agent_utils import COMPUTER_USE_TOOL, _resize_screenshot, parse_computer_use_actions
-from dag_core import AgentPlan, Phase
+from dag_core import AgentPlan, Phase, StepRecord, AWAIT_SIGNAL_TOOL, REQUEST_HELP_TOOL
 from fork_agent import XvfbDisplay
 
 if TYPE_CHECKING:
@@ -49,10 +54,13 @@ def run_phase(
     tag = f"[{agent.id}/{phase.id}]"
     display_num = agent.display_num or 0
     display = XvfbDisplay(vm_ip, server_port, display_num)
-    system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data)
-    tools = [COMPUTER_USE_TOOL]
-    resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
+    system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data,
+                                          has_orchestrator=orchestrator is not None)
+    tools: List[Any] = [COMPUTER_USE_TOOL]
+    if orchestrator:
+        tools.extend([AWAIT_SIGNAL_TOOL, REQUEST_HELP_TOOL])
 
+    resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
     is_continuation = phase_index > 0
 
     initial_text = (
@@ -75,7 +83,7 @@ def run_phase(
         {"role": "user", "content": [{"type": "text", "text": initial_text}]}
     ]
 
-    last_tool_use_id: Optional[str] = None
+    pending_tool_results: List[Dict[str, Any]] = []
     final_response_text = ""
     start_time = time.time()
 
@@ -94,15 +102,12 @@ def run_phase(
                 {"type": "text", "text": f"Step {step}: screenshot unavailable."},
             ]
 
-        if last_tool_use_id:
-            obs_content.insert(0, {
-                "type": "tool_result",
-                "tool_use_id": last_tool_use_id,
-                "content": "Action executed.",
-            })
-            last_tool_use_id = None
+        # Prepend any pending tool results (from await_signal, request_help, or computer)
+        for tr in pending_tool_results:
+            obs_content.insert(0, tr)
+        pending_tool_results.clear()
 
-        # Inject orchestrator messages (e.g., "another agent is handling X, you focus on Y")
+        # Inject orchestrator messages
         if orchestrator:
             pending = orchestrator.get_pending_messages(agent.id)
             if pending:
@@ -140,35 +145,103 @@ def run_phase(
         logger.info("%s Response: %s", tag, response_text[:200])
         final_response_text = response_text
 
-        # Report progress so the monitor can peek
+        # Report progress to monitor
         phase.current_step = step
         phase.latest_response = response_text
 
         with open(os.path.join(phase_output, f"step_{step:03d}_response.txt"), "w") as f:
             f.write(response_text)
 
-        # Execute computer-use actions
+        # Process all tool calls
+        step_action_summary = ""
         for block in content_blocks:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
-            if block.get("name") != "computer":
-                continue
 
-            last_tool_use_id = block.get("id")
+            tool_name = block.get("name")
+            tool_id = block.get("id")
             tool_input = block.get("input", {})
-            actions = parse_computer_use_actions([block], resize_factor)
-            action_code = next(
-                (a for a in actions if a not in ("DONE", "FAIL", "WAIT")),
-                None,
-            )
 
-            if action_code:
-                logger.info("%s Action: %s", tag, action_code[:120])
-                display.run_action(action_code)
-                time.sleep(1)
-                _save_action(phase_output, step, tool_input)
+            if tool_name == "computer":
+                actions = parse_computer_use_actions([block], resize_factor)
+                action_code = next(
+                    (a for a in actions if a not in ("DONE", "FAIL", "WAIT")),
+                    None,
+                )
+                if action_code:
+                    logger.info("%s Action: %s", tag, action_code[:120])
+                    display.run_action(action_code)
+                    time.sleep(1)
+                    step_action_summary = _action_summary(tool_input)
+                    _save_action(phase_output, step, tool_input)
 
-        # Check for phase/subtask completion
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": "Action executed.",
+                })
+
+            elif tool_name == "await_signal" and orchestrator:
+                signal_name = tool_input.get("signal_name", "")
+                logger.info("%s await_signal('%s') — blocking", tag, signal_name)
+                step_action_summary = f"await_signal({signal_name})"
+
+                remaining_timeout = None
+                if orchestrator._start_time:
+                    remaining_timeout = max(1.0, orchestrator.task_timeout - (time.time() - orchestrator._start_time))
+
+                data = orchestrator.wait_signal(signal_name, timeout=remaining_timeout)
+
+                if data is None or orchestrator.is_signal_failed(signal_name):
+                    result_content = json.dumps({"error": f"Signal '{signal_name}' failed or timed out"})
+                    logger.warning("%s await_signal('%s') — failed", tag, signal_name)
+                else:
+                    summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
+                    result_content = summary
+                    logger.info("%s await_signal('%s') — received %d chars", tag, signal_name, len(result_content))
+
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result_content,
+                })
+
+            elif tool_name == "request_help" and orchestrator:
+                helper_task = tool_input.get("task", "")
+                reason = tool_input.get("reason", "")
+                logger.info("%s request_help: %s (reason: %s)", tag, helper_task[:100], reason[:60])
+                step_action_summary = f"request_help({helper_task[:50]})"
+
+                helper_id = orchestrator.spawn_helper(helper_task)
+                if helper_id:
+                    result_content = f"Helper '{helper_id}' spawned on a separate display. It will work on: {helper_task}"
+                else:
+                    result_content = "No free displays available. You'll need to handle this yourself."
+
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result_content,
+                })
+
+            else:
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": f"Unknown tool: {tool_name}",
+                })
+
+        # Record step in history for monitor
+        if not step_action_summary:
+            step_action_summary = response_text[:80].replace("\n", " ")
+        phase.step_history.append(StepRecord(
+            step_num=step,
+            timestamp=step_timestamp,
+            elapsed=step_timestamp - start_time,
+            action_summary=step_action_summary,
+        ))
+
+        # Check for completion
         for line in final_response_text.strip().split("\n"):
             line = line.strip()
             if _COMPLETION.search(line):
@@ -203,6 +276,7 @@ def _build_system_prompt(
     phase_index: int,
     password: str,
     signal_data: Optional[Dict[str, Any]],
+    has_orchestrator: bool = False,
 ) -> str:
     display_num = agent.display_num or 0
     chrome_port = 1337 + display_num
@@ -227,6 +301,18 @@ def _build_system_prompt(
         )
     else:
         prompt += "Your display has been prepared with the necessary applications.\n\n"
+
+    if has_orchestrator:
+        prompt += (
+            "**COLLABORATION TOOLS** (use alongside the computer tool):\n"
+            "- `await_signal(signal_name)`: Block until data from another agent is ready. "
+            "Do your independent setup work first (open apps, navigate), then call this "
+            "only when you actually need the data. Returns the data as the tool result.\n"
+            "- `request_help(task, reason)`: Spawn a helper agent on a separate display "
+            "to work in parallel. Use when you discover separable work — e.g., multiple "
+            "files to process, independent sections to write. The helper cannot see your "
+            "screen. Give it a specific, self-contained task.\n\n"
+        )
 
     if signal_data:
         prompt += "**Data from other agents** (received via signals):\n"
@@ -259,6 +345,24 @@ def _build_system_prompt(
     return prompt
 
 
+def _action_summary(tool_input: Dict[str, Any]) -> str:
+    action_type = tool_input.get("action", "")
+    if action_type == "type":
+        text = tool_input.get("text", "")
+        return f"type: {text[:40]}" if len(text) <= 40 else f"type: {text[:37]}..."
+    elif action_type == "key":
+        return f"key: {tool_input.get('text', '')}"
+    elif action_type in ("left_click", "right_click", "double_click", "middle_click"):
+        return f"{action_type} at {tool_input.get('coordinate', [])}"
+    elif action_type == "mouse_move":
+        return f"move to {tool_input.get('coordinate', [])}"
+    elif action_type == "scroll":
+        return f"scroll {tool_input.get('scroll_direction', '')} {tool_input.get('scroll_amount', 3)}"
+    elif action_type == "screenshot":
+        return "screenshot"
+    return f"computer: {action_type}"
+
+
 def _save_screenshot(phase_output: str, step: int, shot: bytes, timestamp: float):
     with open(os.path.join(phase_output, f"step_{step:03d}.png"), "wb") as f:
         f.write(shot)
@@ -282,21 +386,6 @@ def _build_screenshot_observation(step: int, shot: bytes) -> List[Dict[str, Any]
 
 
 def _save_action(phase_output: str, step: int, tool_input: Dict[str, Any]):
-    action_type = tool_input.get("action", "")
-    labels = {
-        "type": f"Type: {tool_input.get('text', '')}",
-        "key": f"Key: {tool_input.get('text', '')}",
-        "mouse_move": f"Move to {tool_input.get('coordinate', [])}",
-        "screenshot": "Screenshot",
-    }
-    click_types = ("left_click", "right_click", "double_click", "middle_click")
-
-    if action_type in labels:
-        text = labels[action_type]
-    elif action_type in click_types:
-        text = f"{action_type.replace('_', ' ').title()} at {tool_input.get('coordinate', [])}"
-    else:
-        text = f"Computer: {action_type}"
-
+    text = _action_summary(tool_input)
     with open(os.path.join(phase_output, f"step_{step:03d}_action.txt"), "w") as f:
         f.write(text)
