@@ -143,6 +143,9 @@ Free displays available for helpers: {idle_displays}
 Helpers you have already spawned (do NOT duplicate):
 {helpers_already_spawned}
 
+Messages you have already sent to the worker (do NOT repeat the same message):
+{messages_already_sent}
+
 Your previous assessment:
 {previous_assessment}
 
@@ -165,7 +168,9 @@ pace_notes: <observations about speed or struggles>
 
 2. Decide on action:
 
-CONTINUE — worker is on track, no intervention needed
+CONTINUE — worker is on track, no intervention needed. Also use this if \
+you already sent a nudge about the same issue and the worker hasn't had \
+a chance to respond yet — don't repeat yourself.
 
 SPAWN_HELPER — there is separable work WITHIN THIS WORKER'S TASK that a \
 helper could do in parallel. Do NOT spawn helpers for work assigned to the \
@@ -176,10 +181,12 @@ helper_setup: <"none" or a JSON setup action>
 message_to_worker: <tell worker what to skip since helper handles it>
 
 NUDGE — worker is going off track, stuck, or doing work that belongs to \
-another agent. If the worker is doing another agent's job, tell it to stop. \
-Do NOT provide task-specific data or answers yourself — only provide \
-coordination guidance (what to do, what to skip, how to proceed).
-message_to_worker: <guidance or course correction>"""
+another agent. Give DIRECTIONAL guidance only: what to do, what to stop, \
+whether to wait or proceed. Do NOT suggest specific tool parameters, signal \
+names, file paths, or commands — you don't know the implementation details. \
+Do NOT provide task-specific data or answers. Do NOT repeat a message you \
+already sent (check the list above).
+message_to_worker: <brief directional guidance>"""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -211,6 +218,7 @@ class Manager:
         self._assessment = "(no assessment yet — worker just started)"
         self._helpers_spawned: List[str] = []
         self._helper_ids: List[str] = []
+        self._messages_sent: List[str] = []
         self._sibling_info = self._format_siblings(sibling_agents or [])
 
     def run(self):
@@ -286,6 +294,12 @@ class Manager:
         else:
             helpers_text = "(none)"
 
+        # Format messages already sent so the LLM doesn't repeat
+        if self._messages_sent:
+            messages_text = "\n".join(f"  - {m}" for m in self._messages_sent[-5:])
+        else:
+            messages_text = "(none)"
+
         # If at max helpers, don't show idle displays to avoid tempting the LLM
         effective_idle = idle_displays if len(self._helpers_spawned) < MAX_HELPERS_PER_MANAGER else 0
 
@@ -296,6 +310,7 @@ class Manager:
             phase_task=phase.task[:300],
             idle_displays=effective_idle,
             helpers_already_spawned=helpers_text,
+            messages_already_sent=messages_text,
             previous_assessment=self._assessment,
             new_steps=new_steps_text,
             latest_response=phase.latest_response[:2000],
@@ -326,9 +341,9 @@ class Manager:
             if isinstance(b, dict) and b.get("type") == "text"
         )
 
-        self._parse_and_act(response, tag)
+        self._parse_and_act(response, tag, total_elapsed=total_elapsed, avg_step_time=avg_step_time)
 
-    def _parse_and_act(self, response: str, tag: str):
+    def _parse_and_act(self, response: str, tag: str, total_elapsed: float = 0, avg_step_time: float = 0):
         # Extract assessment
         if "ASSESSMENT" in response:
             assessment_lines = []
@@ -344,6 +359,31 @@ class Manager:
                     assessment_lines.append(stripped)
             if assessment_lines:
                 self._assessment = "\n".join(assessment_lines)
+
+            # Parse and log structured predictions
+            work_completed = ""
+            work_remaining = ""
+            est_steps = ""
+            pace_notes = ""
+            for line in assessment_lines:
+                if line.startswith("work_completed:"):
+                    work_completed = line[len("work_completed:"):].strip()
+                elif line.startswith("work_remaining:"):
+                    work_remaining = line[len("work_remaining:"):].strip()
+                elif line.startswith("estimated_remaining_steps:"):
+                    est_steps = line[len("estimated_remaining_steps:"):].strip()
+                elif line.startswith("pace_notes:"):
+                    pace_notes = line[len("pace_notes:"):].strip()
+
+            est_time = ""
+            try:
+                est_time = f" (~{int(est_steps) * avg_step_time:.0f}s)" if est_steps and avg_step_time > 0 else ""
+            except (ValueError, TypeError):
+                pass
+
+            logger.info("%s Assessment: done=[%s] remaining=[%s] est_steps=%s%s pace=[%s]",
+                         tag, work_completed[:60], work_remaining[:60],
+                         est_steps, est_time, pace_notes[:60])
 
         if "SPAWN_HELPER" in response:
             if len(self._helpers_spawned) >= MAX_HELPERS_PER_MANAGER:
@@ -381,6 +421,7 @@ class Manager:
                         self._helpers_spawned.append(f"{helper_id}: {helper_task[:80]}")
                     if message:
                         self.orchestrator.send_message(self.agent.id, message)
+                        self._messages_sent.append(message[:100])
                 else:
                     logger.info("%s SPAWN_HELPER but no task parsed", tag)
 
@@ -393,6 +434,7 @@ class Manager:
             if message:
                 logger.info("%s NUDGE: %s", tag, message[:100])
                 self.orchestrator.send_message(self.agent.id, message)
+                self._messages_sent.append(message[:100])
 
         elif "CONTINUE" in response:
             logger.info("%s CONTINUE", tag)
