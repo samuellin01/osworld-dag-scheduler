@@ -633,7 +633,6 @@ def main():
     parser.add_argument("--region", default="us-east-1", help="AWS region")
     parser.add_argument("--headless", action="store_true", help="Run headless")
     parser.add_argument("--model", default="claude-opus-4-6", help="Model name")
-    parser.add_argument("--max-steps", type=int, default=30, help="Max steps per agent (default: 30)")
     parser.add_argument("--output-dir", default="benchmark_results", help="Output dir")
     args = parser.parse_args()
 
