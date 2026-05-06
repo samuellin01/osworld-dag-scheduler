@@ -190,34 +190,33 @@ def build_timeline_from_api_calls(api_calls: List[Dict], agent_dirs: List[Tuple[
     # Supplement with direct file reading for agents not in API calls
     for agent_id, agent_dir in agent_dirs:
         if agent_id not in agent_steps_map or not agent_steps_map[agent_id]:
-            # Try to read step files directly
+            # Try flat layout first, then phase subdirs
             step_files = sorted(agent_dir.glob('step_*_response.txt'))
+            if not step_files:
+                step_files = sorted(agent_dir.glob('*/step_*_response.txt'))
             if step_files:
                 if agent_id not in agent_steps_map:
                     agent_steps_map[agent_id] = {}
 
-                # Get first step file's mtime as baseline
                 first_mtime = step_files[0].stat().st_mtime if step_files else 0
+                global_step = 0
 
                 for step_file in step_files:
-                    # Extract step number from filename: step_001_response.txt -> 1
                     match = re.search(r'step_(\d+)_response\.txt', step_file.name)
                     if not match:
                         continue
-                    step_num = int(match.group(1))
+                    global_step += 1
 
-                    # Read action from response file
                     try:
                         content = step_file.read_text(encoding='utf-8', errors='replace').strip()
                         action = content
                     except:
                         action = "Step executed"
 
-                    # Use file modification time relative to start
                     file_mtime = step_file.stat().st_mtime
                     relative_time = file_mtime - first_mtime if start_time else 0
 
-                    agent_steps_map[agent_id][step_num] = {
+                    agent_steps_map[agent_id][global_step] = {
                         'timestamp': relative_time,
                         'action': action,
                         'tool': '',
@@ -342,13 +341,22 @@ def generate_trajectory_html(
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Discover agent directories
+    # Discover agent directories (supports fork_parallel and orchestrator layouts)
     agent_dirs: List[Tuple[str, pathlib.Path]] = []
-    for d in sorted(local_path.iterdir()):
-        if not d.is_dir():
-            continue
-        if d.name == "root" or d.name.startswith("root_child_"):
-            agent_dirs.append((d.name, d))
+    result_agents = result_data.get("agents", {})
+    if result_agents:
+        for agent_id in sorted(result_agents.keys()):
+            agent_path = local_path / agent_id
+            if agent_path.is_dir():
+                agent_dirs.append((agent_id, agent_path))
+    if not agent_dirs:
+        for d in sorted(local_path.iterdir()):
+            if not d.is_dir():
+                continue
+            if d.name == "root" or d.name.startswith("root_child_"):
+                agent_dirs.append((d.name, d))
+            elif (d / "bedrock_api_calls.jsonl").is_file():
+                agent_dirs.append((d.name, d))
 
     agent_dirs.sort()
 
@@ -384,8 +392,10 @@ def generate_trajectory_html(
     # Find earliest timestamp across all agents for relative timing
     first_timestamp = None
     for agent_id, agent_dir in agent_dirs:
-        timestamp_file = agent_dir / "step_001_timestamp.txt"
-        if timestamp_file.is_file():
+        ts_files = list(agent_dir.glob("step_001_timestamp.txt"))
+        if not ts_files:
+            ts_files = list(agent_dir.glob("*/step_001_timestamp.txt"))
+        for timestamp_file in ts_files:
             try:
                 ts = float(timestamp_file.read_text().strip())
                 if first_timestamp is None or ts < first_timestamp:
@@ -395,18 +405,22 @@ def generate_trajectory_html(
 
     agent_data = []
     for agent_id, agent_dir in agent_dirs:
-        step_files = sorted([f for f in agent_dir.glob("step_*.png")])
-        steps = []
+        # Collect step files from flat layout (fork_parallel) or phase subdirs (orchestrator)
+        step_files = sorted(agent_dir.glob("step_*.png"))
+        if not step_files:
+            step_files = sorted(agent_dir.glob("*/step_*.png"))
 
+        raw_steps = []
         for step_file in step_files:
             m = re.match(r"step_(\d+)\.png$", step_file.name)
             if not m:
                 continue
-            step_num = int(m.group(1))
+            local_step_num = int(m.group(1))
+            phase_dir = step_file.parent
+            is_nested = (phase_dir != agent_dir)
 
-            # Read timestamp from step_NNN_timestamp.txt (absolute time when screenshot was taken)
             timestamp = 0
-            timestamp_file = agent_dir / f"step_{step_num:03d}_timestamp.txt"
+            timestamp_file = phase_dir / f"step_{local_step_num:03d}_timestamp.txt"
             if timestamp_file.is_file():
                 try:
                     absolute_ts = float(timestamp_file.read_text().strip())
@@ -414,31 +428,36 @@ def generate_trajectory_html(
                 except (ValueError, OSError):
                     pass
 
-            # Read thinking/reasoning from step response file
             thinking = ""
-            response_file = agent_dir / f"step_{step_num:03d}_response.txt"
+            response_file = phase_dir / f"step_{local_step_num:03d}_response.txt"
             if response_file.is_file():
                 try:
                     thinking = response_file.read_text(encoding='utf-8', errors='replace').strip()
                 except OSError:
                     pass
 
-            # Screenshot URL
-            screenshot_url = f"{img_base}/{agent_id}/step_{step_num:03d}.png"
+            if is_nested:
+                screenshot_url = f"{img_base}/{agent_id}/{phase_dir.name}/step_{local_step_num:03d}.png"
+            else:
+                screenshot_url = f"{img_base}/{agent_id}/step_{local_step_num:03d}.png"
 
-            steps.append({
-                'num': step_num,
+            raw_steps.append({
                 'timestamp': timestamp,
                 'thinking': thinking,
                 'screenshot': screenshot_url,
             })
 
+        # Sort by timestamp and assign sequential step numbers
+        raw_steps.sort(key=lambda x: x['timestamp'])
+        steps = []
+        for i, entry in enumerate(raw_steps, 1):
+            entry['num'] = i
+            steps.append(entry)
+
         # Get agent timeline span
         timeline = agent_timeline.get(agent_id, {})
         start_time = timeline.get('start', 0)
 
-        # Use completion timestamp if available (when agent finishes)
-        # Otherwise use last step timestamp
         completion_file = agent_dir / "completion_timestamp.txt"
         if completion_file.is_file():
             try:
@@ -451,7 +470,7 @@ def generate_trajectory_html(
 
         agent_info = result_data.get("agents", {}).get(agent_id, {})
         status = agent_info.get("status", "unknown")
-        display_num = agent_info.get("display", "?")
+        display_num = agent_info.get("display_num", agent_info.get("display", "?"))
 
         agent_data.append({
             'id': agent_id,
@@ -1126,18 +1145,15 @@ h2 {{
 
         is_root = (agent_id == 'root')
 
-        # Determine bar class with specific child colors
         if is_root:
             bar_class = 'agent-root'
+        elif 'child_' in agent_id:
+            child_num = agent_id.split('_')[-1]
+            bar_class = f'agent-child-{child_num}'
         else:
-            # Extract child number for specific colors (root_child_0 -> 0)
-            if 'child_' in agent_id:
-                child_num = agent_id.split('_')[-1]
-                bar_class = f'agent-child-{child_num}'
-            else:
-                bar_class = 'agent-child'
+            bar_class = f'agent-child-{idx % 7}'
 
-        top_offset = 0 if is_root else (idx * 24)
+        top_offset = idx * 24
 
         # Status icon
         status = agent.get('status', 'unknown')
