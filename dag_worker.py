@@ -15,13 +15,16 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import anthropic
 
 from agent_utils import COMPUTER_USE_TOOL, _resize_screenshot, parse_computer_use_actions
 from dag_core import AgentPlan, Phase
 from fork_agent import XvfbDisplay
+
+if TYPE_CHECKING:
+    from dag_core import Orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ def run_phase(
     output_dir: str,
     password: str = "osworld-public-evaluation",
     signal_data: Optional[Dict[str, Any]] = None,
+    orchestrator: Optional["Orchestrator"] = None,
 ) -> Dict[str, Any]:
     """Run a CUA agent loop for one phase. Returns result dict."""
     tag = f"[{agent.id}/{phase.id}]"
@@ -60,7 +64,7 @@ def run_phase(
     if signal_data:
         initial_text += "\n\nData from other agents:\n"
         for sig_name, data in signal_data.items():
-            summary = data.get("summary", str(data))[:500] if isinstance(data, dict) else str(data)[:500]
+            summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
             initial_text += f"  [{sig_name}]: {summary}\n"
         initial_text += "\nUse this data to complete your phase."
 
@@ -98,6 +102,13 @@ def run_phase(
             })
             last_tool_use_id = None
 
+        # Inject orchestrator messages (e.g., "another agent is handling X, you focus on Y")
+        if orchestrator:
+            pending = orchestrator.get_pending_messages(agent.id)
+            if pending:
+                msg_text = "\n".join(f"[ORCHESTRATOR]: {m}" for m in pending)
+                obs_content.append({"type": "text", "text": msg_text})
+
         messages.append({"role": "user", "content": obs_content})
 
         try:
@@ -128,6 +139,10 @@ def run_phase(
         )
         logger.info("%s Response: %s", tag, response_text[:200])
         final_response_text = response_text
+
+        # Report progress so the monitor can peek
+        phase.current_step = step
+        phase.latest_response = response_text
 
         with open(os.path.join(phase_output, f"step_{step:03d}_response.txt"), "w") as f:
             f.write(response_text)
@@ -216,7 +231,7 @@ def _build_system_prompt(
     if signal_data:
         prompt += "**Data from other agents** (received via signals):\n"
         for sig_name, data in signal_data.items():
-            summary = data.get("summary", str(data))[:500] if isinstance(data, dict) else str(data)[:500]
+            summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
             prompt += f"  [{sig_name}]: {summary}\n"
         prompt += "\nUse this data. Do NOT redo work that other agents already completed.\n\n"
 
