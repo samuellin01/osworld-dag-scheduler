@@ -5,7 +5,8 @@ Architecture:
   - Each agent runs phases sequentially on the same display
   - Cross-agent data flows through named signals (signal/await)
   - All agents start immediately; they only block at await points
-  - Setup (no cross-agent deps) runs in parallel across all agents
+  - Monitor thread peeks at agent progress and spawns helpers when needed
+  - Orchestrator can message workers to narrow their focus
 
 Example:
   Agent A: [open chrome] → [search] → [extract] → signal("results")
@@ -13,16 +14,20 @@ Example:
 
   Agent B's first two actions run in parallel with Agent A.
   B only blocks at the await point. Both agents start immediately.
+
+  If A is slow, the monitor spawns a helper and messages A:
+  "Helper is handling file 3, you focus on files 1-2."
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from display_pool import DisplayPool
 from setup_executor import SetupExecutor
@@ -53,6 +58,8 @@ class Phase:
     result: Optional[Dict[str, Any]] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
+    current_step: int = 0
+    latest_response: str = ""
 
 
 @dataclass
@@ -77,12 +84,44 @@ class DAGPlan:
     created_at: float = field(default_factory=time.time)
 
 
-class Orchestrator:
-    """Signal/await orchestrator for parallel agent execution.
+_MONITOR_PROMPT = """\
+You are monitoring a computer-use agent working on a task.
 
-    All agents start immediately on separate displays. Each agent runs
-    its phases sequentially, blocking only at await points where it
-    needs another agent's signal data.
+Overall task: {root_task}
+Agent: {agent_id} — {agent_task}
+Current phase: {phase_task}
+Progress: step {current_step} of {max_steps} ({pct_used:.0f}% of budget used)
+Elapsed: {elapsed:.0f}s
+
+Agent's latest output:
+{latest_response}
+
+There are {idle_displays} free displays available to spawn a helper agent.
+
+Should we spawn a helper agent to take over part of this agent's remaining work?
+
+Only recommend this if:
+- There is clearly separable remaining work (e.g., unprocessed files, unwritten sections)
+- The agent is unlikely to finish everything within its remaining step budget
+- A helper can work independently on a separate display without conflicting
+
+If YES, respond in exactly this format:
+REPLAN
+helper_task: <specific, self-contained task description for the helper>
+helper_setup: <"none" or a JSON setup action>
+message_to_agent: <tell the current agent what to skip since the helper handles it>
+
+If NO, respond with just:
+CONTINUE"""
+
+
+class Orchestrator:
+    """Signal/await orchestrator with runtime monitoring and replanning.
+
+    All agents start immediately on separate displays. The monitor thread
+    periodically peeks at agent progress and can:
+      - Spawn helper agents on free displays for separable remaining work
+      - Message workers to narrow their focus
     """
 
     def __init__(
@@ -97,6 +136,7 @@ class Orchestrator:
         output_dir: str,
         task_timeout: float = 1200.0,
         password: str = "osworld-public-evaluation",
+        monitor_interval: float = 30.0,
     ):
         self.plan = plan
         self.display_pool = display_pool
@@ -108,6 +148,7 @@ class Orchestrator:
         self.output_dir = output_dir
         self.task_timeout = task_timeout
         self.password = password
+        self.monitor_interval = monitor_interval
 
         self._lock = threading.RLock()
         self._signal_events: Dict[str, threading.Event] = {
@@ -116,6 +157,14 @@ class Orchestrator:
         self._agent_threads: Dict[str, threading.Thread] = {}
         self._bedrock_clients: Dict[str, Any] = {}
         self._start_time: Optional[float] = None
+
+        # Messaging: orchestrator -> worker
+        self._agent_messages: Dict[str, List[str]] = {}
+
+        # Runtime helpers
+        self._helpers: Dict[str, AgentPlan] = {}
+        self._helper_count = 0
+        self._replanned_agents: Set[str] = set()
 
     def get_all_bedrock_clients(self) -> Dict[str, Any]:
         with self._lock:
@@ -164,6 +213,21 @@ class Orchestrator:
         with self._lock:
             signal = self.plan.signals.get(name)
             return signal.failed if signal else True
+
+    # ------------------------------------------------------------------
+    # Messaging: orchestrator -> worker
+    # ------------------------------------------------------------------
+
+    def send_message(self, agent_id: str, message: str):
+        """Send a message to a running agent. Injected into its next CUA observation."""
+        with self._lock:
+            self._agent_messages.setdefault(agent_id, []).append(message)
+        logger.info("Message -> %s: %s", agent_id, message[:120])
+
+    def get_pending_messages(self, agent_id: str) -> List[str]:
+        """Called by the worker to pick up orchestrator messages."""
+        with self._lock:
+            return self._agent_messages.pop(agent_id, [])
 
     # ------------------------------------------------------------------
     # Agent execution
@@ -235,6 +299,7 @@ class Orchestrator:
                     output_dir=agent_output,
                     password=self.password,
                     signal_data=signal_data if signal_data else None,
+                    orchestrator=self,
                 )
 
                 phase.end_time = time.time()
@@ -271,6 +336,174 @@ class Orchestrator:
                 self.display_pool.release(agent.display_num)
 
     # ------------------------------------------------------------------
+    # Monitor: peek at progress, spawn helpers, message workers
+    # ------------------------------------------------------------------
+
+    def _start_monitor(self):
+        if self.monitor_interval <= 0:
+            return
+        monitor_output = os.path.join(self.output_dir, "monitor")
+        os.makedirs(monitor_output, exist_ok=True)
+        self._monitor_bedrock = self.bedrock_factory(monitor_output, "monitor")
+        with self._lock:
+            self._bedrock_clients["monitor"] = self._monitor_bedrock
+
+        thread = threading.Thread(target=self._monitor_loop, daemon=True, name="monitor")
+        thread.start()
+        logger.info("Monitor started (interval=%ds)", self.monitor_interval)
+
+    def _monitor_loop(self):
+        while True:
+            time.sleep(self.monitor_interval)
+            if self._is_all_done():
+                break
+            if self._start_time and (time.time() - self._start_time) > self.task_timeout:
+                break
+            try:
+                self._check_all_agents()
+            except Exception as e:
+                logger.warning("Monitor check failed: %s", e)
+
+    def _is_all_done(self) -> bool:
+        with self._lock:
+            originals = all(a.status in ("done", "failed") for a in self.plan.agents.values())
+            helpers = all(a.status in ("done", "failed") for a in self._helpers.values())
+            return originals and helpers
+
+    def _check_all_agents(self):
+        all_agents = list(self.plan.agents.values()) + list(self._helpers.values())
+        for agent in all_agents:
+            if agent.status != "running":
+                continue
+            if agent.id in self._replanned_agents:
+                continue
+
+            phase = next((p for p in agent.phases if p.status == "running"), None)
+            if not phase:
+                continue
+
+            # Only evaluate once the agent has used enough of its budget to judge
+            if phase.current_step < max(5, phase.max_steps * 0.4):
+                continue
+
+            idle_count = self.display_pool.get_idle_count()
+            if idle_count == 0:
+                continue
+
+            self._evaluate_and_maybe_replan(agent, phase, idle_count)
+
+    def _evaluate_and_maybe_replan(self, agent: AgentPlan, phase: Phase, idle_displays: int):
+        elapsed = time.time() - (phase.start_time or time.time())
+        pct_used = (phase.current_step / phase.max_steps) * 100 if phase.max_steps > 0 else 0
+
+        prompt = _MONITOR_PROMPT.format(
+            root_task=self.plan.root_task[:500],
+            agent_id=agent.id,
+            agent_task=agent.task[:300],
+            phase_task=phase.task[:300],
+            current_step=phase.current_step,
+            max_steps=phase.max_steps,
+            pct_used=pct_used,
+            elapsed=elapsed,
+            latest_response=phase.latest_response[:2000],
+            idle_displays=idle_displays,
+        )
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+
+        logger.info("Monitor evaluating %s/%s (step %d/%d, %.0fs elapsed)",
+                     agent.id, phase.id, phase.current_step, phase.max_steps, elapsed)
+
+        try:
+            content_blocks, _ = self._monitor_bedrock.chat(
+                messages=messages,
+                system="You are a task monitoring assistant. Be decisive and brief.",
+                model=self.model,
+                temperature=0.3,
+                max_tokens=500,
+            )
+        except Exception as e:
+            logger.warning("Monitor LLM call failed: %s", e)
+            return
+
+        response = "".join(
+            b.get("text", "") for b in content_blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+
+        if "REPLAN" not in response:
+            logger.info("Monitor: %s/%s — CONTINUE", agent.id, phase.id)
+            return
+
+        # Parse replan response
+        helper_task = ""
+        helper_setup: List[Dict[str, Any]] = []
+        message_to_agent = ""
+
+        for line in response.split("\n"):
+            line = line.strip()
+            if line.startswith("helper_task:"):
+                helper_task = line[len("helper_task:"):].strip()
+            elif line.startswith("helper_setup:"):
+                setup_str = line[len("helper_setup:"):].strip()
+                if setup_str.lower() != "none":
+                    try:
+                        parsed = json.loads(setup_str)
+                        helper_setup = [parsed] if isinstance(parsed, dict) else parsed
+                    except json.JSONDecodeError:
+                        pass
+            elif line.startswith("message_to_agent:"):
+                message_to_agent = line[len("message_to_agent:"):].strip()
+
+        if not helper_task:
+            logger.warning("Monitor: REPLAN response but no helper_task parsed")
+            return
+
+        logger.info("Monitor: REPLAN for %s/%s", agent.id, phase.id)
+        logger.info("  Helper task: %s", helper_task[:120])
+        logger.info("  Message: %s", message_to_agent[:120])
+
+        self._replanned_agents.add(agent.id)
+
+        self._spawn_helper(helper_task, helper_setup)
+
+        if message_to_agent:
+            self.send_message(agent.id, message_to_agent)
+
+    def _spawn_helper(self, task: str, setup: List[Dict[str, Any]]):
+        self._helper_count += 1
+        helper_id = f"helper_{self._helper_count}"
+
+        helper = AgentPlan(
+            id=helper_id,
+            task=task,
+            phases=[Phase(id="execute", task=task, max_steps=25)],
+            setup=setup,
+        )
+
+        display_num = self.display_pool.allocate(agent_id=helper_id)
+        if display_num is None:
+            logger.warning("No display available for helper %s", helper_id)
+            return
+
+        helper.display_num = display_num
+
+        with self._lock:
+            self._helpers[helper_id] = helper
+
+        thread = threading.Thread(
+            target=self._run_agent_thread,
+            args=(helper,),
+            daemon=True,
+            name=f"agent-{helper_id}",
+        )
+        with self._lock:
+            self._agent_threads[helper_id] = thread
+        thread.start()
+
+        logger.info("Spawned helper %s on display :%d — %s", helper_id, display_num, task[:80])
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -301,19 +534,37 @@ class Orchestrator:
             thread.start()
             logger.info("Started agent %s on display :%d", agent.id, display_num)
 
-        for agent_id, thread in self._agent_threads.items():
-            remaining = max(1.0, self.task_timeout - (time.time() - self._start_time))
-            thread.join(timeout=remaining)
-            if thread.is_alive():
-                logger.warning("Agent %s still running after timeout", agent_id)
-                self.plan.agents[agent_id].status = "failed"
+        self._start_monitor()
 
+        # Wait for all threads (including dynamically spawned helpers)
+        deadline = self._start_time + self.task_timeout
+        while time.time() < deadline:
+            with self._lock:
+                threads = dict(self._agent_threads)
+            all_done = True
+            for thread in threads.values():
+                if thread.is_alive():
+                    remaining = max(0.1, deadline - time.time())
+                    thread.join(timeout=min(2.0, remaining))
+                    if thread.is_alive():
+                        all_done = False
+            if all_done:
+                break
+
+        # Mark timed-out agents
         duration = time.time() - self._start_time
-        all_done = all(a.status == "done" for a in self.plan.agents.values())
+        all_agents = list(self.plan.agents.values()) + list(self._helpers.values())
+        for agent in all_agents:
+            t = self._agent_threads.get(agent.id)
+            if t and t.is_alive():
+                logger.warning("Agent %s still running after timeout", agent.id)
+                agent.status = "failed"
+
+        all_done = all(a.status == "done" for a in all_agents)
         overall_status = "DONE" if all_done else "FAIL"
 
         agent_summaries = {}
-        for agent in self.plan.agents.values():
+        for agent in all_agents:
             phase_summaries = []
             for phase in agent.phases:
                 summary = ""
@@ -330,13 +581,16 @@ class Orchestrator:
                 "display_num": agent.display_num,
             }
 
-        logger.info("Orchestrator finished: %s (%.1fs, %d agents)",
-                     overall_status, duration, num_agents)
+        total_agents = len(all_agents)
+        helpers_spawned = len(self._helpers)
+        logger.info("Orchestrator finished: %s (%.1fs, %d agents, %d helpers spawned)",
+                     overall_status, duration, total_agents, helpers_spawned)
 
         return {
             "status": overall_status,
             "duration": duration,
             "agents": agent_summaries,
+            "helpers_spawned": helpers_spawned,
             "summary": self._build_summary(agent_summaries),
         }
 
