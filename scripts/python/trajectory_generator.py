@@ -74,7 +74,8 @@ def parse_manager_decisions(agent_dir: pathlib.Path, first_timestamp: Optional[f
     except (json.JSONDecodeError, OSError):
         pass
 
-    return decisions
+    # Filter out stale entries (negative timestamps from interrupted runs)
+    return [d for d in decisions if d['timestamp'] >= 0]
 
 
 def parse_bedrock_api_calls(local_path: pathlib.Path, agent_dirs: List[Tuple[str, pathlib.Path]]) -> List[Dict]:
@@ -426,8 +427,8 @@ def generate_trajectory_html(
 
     total_agents = len(agent_dirs)
     duration = result_data.get("duration", 0)
-    num_agents = result_data.get("num_agents", total_agents)
-    forked = result_data.get("forked", num_agents > 1)
+    num_agents = total_agents
+    forked = num_agents > 1
 
     # Parse API calls for timing data
     api_calls = parse_bedrock_api_calls(local_path, agent_dirs)
@@ -1315,23 +1316,19 @@ h2 {{
     # Action Log
     h.append("<div id='tab-log' class='tab-content active'>")
 
-    # Communication Legend
+    # Legend for the orchestrator architecture
     h.append("  <div class='comm-legend'>")
     h.append("    <div class='comm-legend-item fork'>")
     h.append("      <span class='comm-legend-icon'>🔀</span>")
-    h.append("      <span class='comm-legend-label'>Fork Worker</span>")
+    h.append("      <span class='comm-legend-label'>Helper Spawned</span>")
     h.append("    </div>")
     h.append("    <div class='comm-legend-item message'>")
-    h.append("      <span class='comm-legend-icon'>💬</span>")
-    h.append("      <span class='comm-legend-label'>Message</span>")
-    h.append("    </div>")
-    h.append("    <div class='comm-legend-item peek'>")
-    h.append("      <span class='comm-legend-icon'>👀</span>")
-    h.append("      <span class='comm-legend-label'>Peek</span>")
+    h.append("      <span class='comm-legend-icon'>📋</span>")
+    h.append("      <span class='comm-legend-label'>Scope Update</span>")
     h.append("    </div>")
     h.append("    <div class='comm-legend-item report'>")
     h.append("      <span class='comm-legend-icon'>✅</span>")
-    h.append("      <span class='comm-legend-label'>Report/Done</span>")
+    h.append("      <span class='comm-legend-label'>Subtask Complete</span>")
     h.append("    </div>")
     h.append("  </div>")
 
@@ -1355,8 +1352,10 @@ h2 {{
         h.append("  <div class='action-log'>")
 
         for decision in all_manager_decisions:
-            time_str = fmt_duration(decision['timestamp'])
             dtype = decision['type']
+            if dtype == 'CONTINUE':
+                continue
+            time_str = fmt_duration(decision['timestamp'])
 
             # Color-code by decision type
             if dtype == 'SPAWN_HELPER':
