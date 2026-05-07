@@ -57,18 +57,19 @@ def run_phase(
     tag = f"[{agent.id}/{phase.id}]"
     display_num = agent.display_num or 0
     display = XvfbDisplay(vm_ip, server_port, display_num)
-    # Only show signals from OTHER agents — exclude signals this agent produces
+    # Only show signals this agent's phases actually await — prevents deadlocks
+    # The planner determines WHAT depends on WHAT. The tool gives flexibility on WHEN to block.
     available_signals = None
     if orchestrator:
-        own_signals = set()
+        awaitable = set()
         for p in agent.phases:
-            own_signals.update(p.signals)
-        available_signals = [s for s in orchestrator.plan.signals.keys() if s not in own_signals]
+            awaitable.update(p.awaits)
+        available_signals = sorted(awaitable) if awaitable else None
     system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data,
                                           has_orchestrator=orchestrator is not None,
                                           available_signals=available_signals)
     tools: List[Any] = [COMPUTER_USE_TOOL]
-    if orchestrator:
+    if orchestrator and available_signals:
         tools.append(AWAIT_SIGNAL_TOOL)
 
     resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
