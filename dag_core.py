@@ -163,7 +163,7 @@ New steps since last check:
 Worker's latest output:
 {latest_response}
 
-Updated totals: {total_steps} steps, {total_elapsed:.0f}s elapsed, {avg_step_time:.1f}s/step
+Updated totals: {total_steps} steps, {total_elapsed:.0f}s elapsed
 
 Update your assessment and decide on action:
 
@@ -173,16 +173,16 @@ work_completed: <what the worker has done so far>
 remaining_actions: <list concrete screen actions still needed, using the \
 atomic action vocabulary (click, type, key, scroll). Group by logical chunk. \
 Mark delegated work as SKIP. Example:
-  A) finish reading Test 2: scroll down (2 scrolls) — ~20s
-  B) read Test 3: double_click file, scroll through (5 actions) — ~50s
-  C) compile and signal answers (1 step) — ~10s
-  total: ~8 actions, ~80s
+  A) finish reading Test 2: scroll down (2 scrolls)
+  B) read Test 3: double_click file, scroll through (5 actions)
+  C) compile and signal answers (1 action)
+  total: ~8 actions
   independent chunks: B can run on a separate display>
 parallelism_opportunity: <look at your remaining_actions — can any chunk \
-run independently on a separate display? If yes, name the chunk, estimate \
-time saved. If no, write "none". Example:
-  "Chunk B (read Test 3, ~50s) is independent. Spawning a helper reduces \
-  critical path from ~80s to ~30s.">
+run independently on a separate display? If yes, name the chunk and how many \
+actions it saves from the critical path. If no, write "none". Example:
+  "Chunk B (read Test 3, ~5 actions) is independent. Spawning a helper \
+  reduces critical path from ~8 to ~3 actions.">
 
 2. Decide on action — base this on your parallelism_opportunity analysis:
 
@@ -292,7 +292,6 @@ class Manager:
     def _evaluate(self, phase: Phase, new_steps: List[StepRecord], tag: str):
         total_steps = phase.current_step
         total_elapsed = new_steps[-1].elapsed if new_steps else 0
-        avg_step_time = total_elapsed / total_steps if total_steps > 0 else 0
         idle_displays = self.orchestrator.display_pool.get_idle_count()
 
         # Format new steps with inter-step latency
@@ -333,13 +332,12 @@ class Manager:
             latest_response=phase.latest_response[:2000],
             total_steps=total_steps,
             total_elapsed=total_elapsed,
-            avg_step_time=avg_step_time,
         )
 
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
 
-        logger.info("%s Evaluating (step %d, %.0fs elapsed, %.1fs/step, %d idle displays)",
-                     tag, total_steps, total_elapsed, avg_step_time, idle_displays)
+        logger.info("%s Evaluating (step %d, %.0fs elapsed, %d idle displays)",
+                     tag, total_steps, total_elapsed, idle_displays)
 
         try:
             content_blocks, _ = self.bedrock.chat(
@@ -358,9 +356,9 @@ class Manager:
             if isinstance(b, dict) and b.get("type") == "text"
         )
 
-        self._parse_and_act(response, tag, total_elapsed=total_elapsed, avg_step_time=avg_step_time)
+        self._parse_and_act(response, tag)
 
-    def _parse_and_act(self, response: str, tag: str, total_elapsed: float = 0, avg_step_time: float = 0):
+    def _parse_and_act(self, response: str, tag: str):
         # Extract assessment
         if "ASSESSMENT" in response:
             assessment_lines = []
@@ -381,7 +379,7 @@ class Manager:
             work_completed = ""
             remaining_actions = []
             total_est = ""
-            pace_notes = ""
+            parallelism = ""
             in_remaining = False
             for line in assessment_lines:
                 if line.startswith("work_completed:"):
@@ -389,28 +387,20 @@ class Manager:
                     in_remaining = False
                 elif line.startswith("remaining_actions:"):
                     in_remaining = True
-                elif line.startswith("pace_notes:"):
-                    pace_notes = line[len("pace_notes:"):].strip()
+                elif line.startswith("parallelism_opportunity:"):
+                    parallelism = line[len("parallelism_opportunity:"):].strip()
                     in_remaining = False
                 elif in_remaining:
                     if line.startswith("total:"):
                         total_est = line[len("total:"):].strip()
                         in_remaining = False
-                    elif line.startswith("- "):
-                        remaining_actions.append(line[2:].strip())
-
-            est_time = ""
-            try:
-                num = "".join(c for c in total_est if c.isdigit())
-                if num and avg_step_time > 0:
-                    est_time = f" (~{int(num) * avg_step_time:.0f}s)"
-            except (ValueError, TypeError):
-                pass
+                    elif line.startswith("- ") or line.startswith("A)") or line.startswith("B)") or line.startswith("C)"):
+                        remaining_actions.append(line.strip())
 
             actions_str = " | ".join(remaining_actions[:5]) if remaining_actions else "(none)"
-            logger.info("%s Assessment: done=[%s] actions=[%s] est=%s%s pace=[%s]",
+            logger.info("%s Assessment: done=[%s] actions=[%s] est=%s parallel=[%s]",
                          tag, work_completed[:60], actions_str[:120],
-                         total_est, est_time, pace_notes[:60])
+                         total_est, parallelism[:80])
 
         if "SPAWN_HELPER" in response:
             if len(self._helpers_spawned) >= MAX_HELPERS_PER_MANAGER:
