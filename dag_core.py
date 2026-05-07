@@ -165,9 +165,15 @@ worth offloading. Do NOT spawn for work assigned to other agents or already \
 covered by helpers above.
 helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
-scope_update: <tell the worker what to skip and when to declare SUBTASK \
+scope_update: <tell the worker what changed and when to declare SUBTASK \
 COMPLETE. Example: "Test 3 is now handled separately. Finish Test 2 and \
-declare SUBTASK COMPLETE with your answers.">"""
+declare SUBTASK COMPLETE with your answers.">
+
+SCOPE_UPDATE — the worker's task scope needs updating WITHOUT spawning a \
+helper. Use when the worker is done but doesn't know it, is wasting steps \
+on unnecessary work, or needs to move on to the next step.
+scope_update: <direct task instruction. Example: "Format analysis is complete. \
+Declare SUBTASK COMPLETE with your format findings.">"""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -325,7 +331,7 @@ class Manager:
                     in_assessment = True
                     continue
                 if in_assessment:
-                    if stripped in ("CONTINUE", "SPAWN_HELPER"):
+                    if stripped in ("CONTINUE", "SPAWN_HELPER", "SCOPE_UPDATE"):
                         break
                     assessment_lines.append(stripped)
             if assessment_lines:
@@ -399,6 +405,16 @@ class Manager:
                         self.orchestrator.send_message(self.agent.id, scope_update)
                 else:
                     logger.info("%s SPAWN_HELPER but no task parsed", tag)
+
+        elif "SCOPE_UPDATE" in response:
+            scope_update = ""
+            for line in response.split("\n"):
+                line = line.strip()
+                if line.startswith("scope_update:"):
+                    scope_update = line[len("scope_update:"):].strip()
+            if scope_update:
+                logger.info("%s SCOPE_UPDATE: %s", tag, scope_update[:100])
+                self.orchestrator.send_message(self.agent.id, scope_update)
 
         elif "CONTINUE" in response:
             logger.info("%s CONTINUE", tag)
