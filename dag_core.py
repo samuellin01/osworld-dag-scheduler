@@ -171,28 +171,31 @@ Update your assessment and decide on action:
 ASSESSMENT
 work_completed: <what the worker has done so far>
 remaining_actions: <list concrete screen actions still needed, using the \
-atomic action vocabulary (click, type, key, scroll). Mark delegated work as \
-SKIP. Example:
-  - scroll down to see remaining questions (2 scrolls)
-  - click on Test 3 file to open it (1 double_click)
-  - Test 3: SKIP — helper_1 is handling this
-  - type answers into doc (3 clicks + 2 types)
-  total: ~8 actions>
-pace_notes: <observations about speed or struggles>
+atomic action vocabulary (click, type, key, scroll). Group by logical chunk. \
+Mark delegated work as SKIP. Example:
+  A) finish reading Test 2: scroll down (2 scrolls) — ~20s
+  B) read Test 3: double_click file, scroll through (5 actions) — ~50s
+  C) compile and signal answers (1 step) — ~10s
+  total: ~8 actions, ~80s
+  independent chunks: B can run on a separate display>
+parallelism_opportunity: <look at your remaining_actions — can any chunk \
+run independently on a separate display? If yes, name the chunk, estimate \
+time saved. If no, write "none". Example:
+  "Chunk B (read Test 3, ~50s) is independent. Spawning a helper reduces \
+  critical path from ~80s to ~30s.">
 
-2. Decide on action:
+2. Decide on action — base this on your parallelism_opportunity analysis:
 
-CONTINUE — worker is on track, no intervention needed. Also use this if \
-the worker is in an await_signal state (waiting for data from another agent) \
-or if you already sent a nudge and the worker hasn't responded yet.
+CONTINUE — worker is on track, no parallelism opportunity, or worker is in \
+an await_signal state. Also use this if you already sent a nudge and the \
+worker hasn't responded yet.
 
-SPAWN_HELPER — there is separable work WITHIN THIS WORKER'S TASK that a \
-helper could do in parallel. Do NOT spawn helpers for work assigned to the \
-other agents listed above — their managers handle that. Do NOT duplicate \
-helpers already spawned above.
-helper_task: <specific, self-contained subtask>
+SPAWN_HELPER — your parallelism_opportunity identified an independent chunk \
+worth offloading. Do NOT spawn for work assigned to other agents or already \
+covered by helpers above.
+helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
-message_to_worker: <tell worker what to skip since helper handles it>
+message_to_worker: <tell worker to skip that chunk>
 
 NUDGE — worker is going off track, stuck, or doing work that belongs to \
 another agent. Give DIRECTIONAL guidance only: what to do, what to stop, \
