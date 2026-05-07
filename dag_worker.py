@@ -57,7 +57,13 @@ def run_phase(
     tag = f"[{agent.id}/{phase.id}]"
     display_num = agent.display_num or 0
     display = XvfbDisplay(vm_ip, server_port, display_num)
-    available_signals = list(orchestrator.plan.signals.keys()) if orchestrator else None
+    # Only show signals from OTHER agents — exclude signals this agent produces
+    available_signals = None
+    if orchestrator:
+        own_signals = set()
+        for p in agent.phases:
+            own_signals.update(p.signals)
+        available_signals = [s for s in orchestrator.plan.signals.keys() if s not in own_signals]
     system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data,
                                           has_orchestrator=orchestrator is not None,
                                           available_signals=available_signals)
