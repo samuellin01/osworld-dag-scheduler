@@ -73,9 +73,9 @@ def run_phase(
     else:
         initial_text = f"Your task:\n{phase.task}"
 
-    # Inject data from completed dependencies (phase-level awaits, resolved by orchestrator)
+    # Inject data from completed dependency agents
     if signal_data:
-        initial_text += "\n\nData you need:\n"
+        initial_text += "\n\nData from completed agents:\n"
         for sig_name, data in signal_data.items():
             summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
             initial_text += f"{summary}\n"
@@ -281,11 +281,10 @@ def _build_system_prompt(
         "Follow their instructions — they can see things you can't.\n\n"
     )
 
-    if phase.signals:
-        prompt += (
-            "When you complete your task, include a detailed summary of your results "
-            "and any key data (values, findings, URLs).\n\n"
-        )
+    prompt += (
+        "When you complete your task, include a detailed summary of your results "
+        "and any key data (values, findings, URLs).\n\n"
+    )
 
     prompt += (
         "When done, output SUBTASK COMPLETE followed by a summary of what you accomplished.\n"
