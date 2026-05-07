@@ -163,7 +163,7 @@ actions it saves from the critical path. If no, write "none". Example:
 2. Decide on action — base this on your parallelism_opportunity analysis:
 
 CONTINUE — worker is on track, no parallelism opportunity. Also use this \
-if you already sent a nudge and the worker hasn't responded yet.
+if you already sent a redirect and the worker hasn't responded yet.
 
 SPAWN_HELPER — your parallelism_opportunity identified an independent chunk \
 worth offloading. Do NOT spawn for work assigned to other agents or already \
@@ -172,13 +172,14 @@ helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
 message_to_worker: <tell worker to skip that chunk>
 
-NUDGE — worker is going off track, stuck, or doing work that belongs to \
-another agent. Give DIRECTIONAL guidance only: what to do, what to stop, \
-whether to wait or proceed. Do NOT suggest specific tool parameters, signal \
-names, file paths, or commands — you don't know the implementation details. \
-Do NOT provide task-specific data or answers. Do NOT repeat a message you \
-already sent (check the list above).
-message_to_worker: <brief directional guidance>
+REDIRECT — the worker's task scope has changed (e.g., a helper is now \
+handling part of the work) or the worker is doing something outside its \
+scope. Send an updated task directive. Be specific about what the worker \
+should do now and when to declare SUBTASK COMPLETE. Do NOT repeat a \
+message you already sent (check the list above).
+message_to_worker: <updated task directive, e.g., "Your task is now: finish \
+reading Test 2 only. Test 3 is handled by another agent. When you finish \
+Test 2, declare SUBTASK COMPLETE with your answers."
 
 FORCE_COMPLETE — the worker has finished its portion of the work and is now \
 doing redundant or duplicate work (e.g., re-reading files a helper already \
@@ -349,7 +350,7 @@ class Manager:
                     in_assessment = True
                     continue
                 if in_assessment:
-                    if stripped in ("CONTINUE", "SPAWN_HELPER", "NUDGE"):
+                    if stripped in ("CONTINUE", "SPAWN_HELPER", "REDIRECT", "FORCE_COMPLETE"):
                         break
                     assessment_lines.append(stripped)
             if assessment_lines:
@@ -430,14 +431,14 @@ class Manager:
             else:
                 logger.info("%s FORCE_COMPLETE but no running phase", tag)
 
-        elif "NUDGE" in response:
+        elif "REDIRECT" in response:
             message = ""
             for line in response.split("\n"):
                 line = line.strip()
                 if line.startswith("message_to_worker:"):
                     message = line[len("message_to_worker:"):].strip()
             if message:
-                logger.info("%s NUDGE: %s", tag, message[:100])
+                logger.info("%s REDIRECT: %s", tag, message[:100])
                 self.orchestrator.send_message(self.agent.id, message)
                 self._messages_sent.append(message[:100])
 
