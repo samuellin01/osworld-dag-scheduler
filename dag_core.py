@@ -121,6 +121,8 @@ Other agents working on this task (handled by their own managers — NOT your sc
 
 Your worker's assigned task: {agent_task}
 Current phase: {phase_task}
+Data the worker received at phase start (from completed dependencies):
+{signal_data_summary}
 Free displays available for helpers: {idle_displays}
 
 Helpers you have already spawned (do NOT duplicate):
@@ -206,6 +208,7 @@ class Manager:
         self._helpers_spawned: List[str] = []
         self._helper_ids: List[str] = []
         self._sibling_info = self._format_siblings(sibling_agents or [])
+        self._signal_data_summary = "(none — worker has no dependency data yet)"
 
     def run(self):
         """Main loop: watch steps, evaluate, then merge helper results if any."""
@@ -287,6 +290,7 @@ class Manager:
             sibling_agents=self._sibling_info,
             agent_task=self.agent.task[:300],
             phase_task=phase.task[:300],
+            signal_data_summary=self._signal_data_summary,
             idle_displays=effective_idle,
             helpers_already_spawned=helpers_text,
             previous_assessment=self._assessment,
@@ -700,6 +704,14 @@ class Orchestrator:
                             raise TimeoutError(f"Signal '{signal_name}' timed out")
 
                         signal_data[signal_name] = data
+
+                # Update manager with signal data so it knows what the worker received
+                if signal_data:
+                    summaries = []
+                    for sig_name, data in signal_data.items():
+                        summary = data.get("summary", str(data))[:500] if isinstance(data, dict) else str(data)[:500]
+                        summaries.append(f"  {sig_name}: {summary}")
+                    manager._signal_data_summary = "\n".join(summaries)
 
                 phase.status = "running"
                 phase.start_time = time.time()
