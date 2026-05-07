@@ -3,7 +3,7 @@
 Architecture:
   Orchestrator (plan, signals, displays, task timeout)
   ├── Manager A (LLM, watches every step, spawns helpers, messages worker)
-  │   └── Worker A (CUA: computer + await_signal)
+  │   └── Worker A (CUA: computer only, task-focused)
   ├── Manager B
   │   └── Worker B
   │
@@ -16,7 +16,7 @@ Architecture:
   - Manager maintains a running assessment: work done, work remaining, pace
   - Manager spawns helpers when it sees separable remaining work
   - Manager messages worker to narrow focus ("helper is handling X, skip it")
-  - Worker is a pure CUA executor with computer + await_signal tools
+  - Worker is a pure CUA executor (computer tool only, task-focused)
   - No hard step limits — manager nudges, task timeout is the wall
 """
 
@@ -100,31 +100,6 @@ class DAGPlan:
 
 
 # ------------------------------------------------------------------
-# Worker tool schemas
-# ------------------------------------------------------------------
-
-AWAIT_SIGNAL_TOOL = {
-    "name": "await_signal",
-    "description": (
-        "Block until data from another agent is ready, then return it. "
-        "Use this when you need results from a parallel agent before continuing. "
-        "You can do independent setup work first, then call this when you actually need the data. "
-        "The call will block until the data is available."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "signal_name": {
-                "type": "string",
-                "description": "Name of the signal to wait for (from the task description).",
-            },
-        },
-        "required": ["signal_name"],
-    },
-}
-
-
-# ------------------------------------------------------------------
 # Manager: per-agent supervisor
 # ------------------------------------------------------------------
 
@@ -136,9 +111,9 @@ The worker interacts with the screen using these atomic actions only:
   click (left/right/double), type (text), key (keyboard shortcut), scroll, mouse_move
 Each step = one screenshot + one action. Plan estimates in these terms.
 
-The worker also has an await_signal tool that blocks until another agent's \
-data arrives. If the worker is in an await state, that is normal — it is \
-waiting for data it needs. Do NOT nudge a worker that is correctly awaiting.
+The worker only has the computer tool. It does NOT know about other agents, \
+signals, or the overall task. It just executes its assigned task. The manager \
+handles all coordination.
 
 Overall goal: {root_task}
 
@@ -187,9 +162,8 @@ actions it saves from the critical path. If no, write "none". Example:
 
 2. Decide on action — base this on your parallelism_opportunity analysis:
 
-CONTINUE — worker is on track, no parallelism opportunity, or worker is in \
-an await_signal state. Also use this if you already sent a nudge and the \
-worker hasn't responded yet.
+CONTINUE — worker is on track, no parallelism opportunity. Also use this \
+if you already sent a nudge and the worker hasn't responded yet.
 
 SPAWN_HELPER — your parallelism_opportunity identified an independent chunk \
 worth offloading. Do NOT spawn for work assigned to other agents or already \
