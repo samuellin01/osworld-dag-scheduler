@@ -12,18 +12,7 @@ def parse_bedrock_api_calls(local_path: pathlib.Path, agent_dirs: List[Tuple[str
     """Parse bedrock_api_calls.jsonl from root and all agent directories."""
     calls = []
 
-    # Read from root directory
-    api_calls_path = local_path / "bedrock_api_calls.jsonl"
-    if api_calls_path.is_file():
-        try:
-            with open(api_calls_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        calls.append(json.loads(line))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Also read from each agent directory
+    # Read from agent directories only (skip root/planner/monitor API calls)
     for agent_id, agent_dir in agent_dirs:
         agent_api_calls_path = agent_dir / "bedrock_api_calls.jsonl"
         if agent_api_calls_path.is_file():
@@ -31,7 +20,9 @@ def parse_bedrock_api_calls(local_path: pathlib.Path, agent_dirs: List[Tuple[str
                 with open(agent_api_calls_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         if line.strip():
-                            calls.append(json.loads(line))
+                            call = json.loads(line)
+                            call.setdefault('agent_id', agent_id)
+                            calls.append(call)
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -342,6 +333,8 @@ def generate_trajectory_html(
             pass
 
     # Discover agent directories (supports fork_parallel and orchestrator layouts)
+    # Skip internal dirs: _manager subdirs, monitor, planner
+    _skip_dirs = {"monitor", "planner", "_manager"}
     agent_dirs: List[Tuple[str, pathlib.Path]] = []
     result_agents = result_data.get("agents", {})
     if result_agents:
@@ -352,6 +345,8 @@ def generate_trajectory_html(
     if not agent_dirs:
         for d in sorted(local_path.iterdir()):
             if not d.is_dir():
+                continue
+            if d.name in _skip_dirs or d.name.startswith("_"):
                 continue
             if d.name == "root" or d.name.startswith("root_child_"):
                 agent_dirs.append((d.name, d))
@@ -447,6 +442,9 @@ def generate_trajectory_html(
                 'screenshot': screenshot_url,
             })
 
+        # Filter out steps with negative timestamps (stale files from interrupted runs)
+        raw_steps = [s for s in raw_steps if s['timestamp'] >= 0]
+
         # Sort by timestamp and assign sequential step numbers
         raw_steps.sort(key=lambda x: x['timestamp'])
         steps = []
@@ -454,19 +452,23 @@ def generate_trajectory_html(
             entry['num'] = i
             steps.append(entry)
 
-        # Get agent timeline span
-        timeline = agent_timeline.get(agent_id, {})
-        start_time = timeline.get('start', 0)
+        # Derive start/end from step timestamps (most reliable)
+        if steps:
+            start_time = steps[0]['timestamp']
+            end_time = steps[-1]['timestamp']
+        else:
+            timeline = agent_timeline.get(agent_id, {})
+            start_time = timeline.get('start', 0)
+            end_time = timeline.get('end', 0)
 
+        # Override with completion timestamp if available
         completion_file = agent_dir / "completion_timestamp.txt"
         if completion_file.is_file():
             try:
                 completion_ts = float(completion_file.read_text().strip())
-                end_time = completion_ts - first_timestamp if first_timestamp else 0
+                end_time = max(end_time, completion_ts - first_timestamp if first_timestamp else 0)
             except (ValueError, OSError):
-                end_time = steps[-1]['timestamp'] if steps else timeline.get('end', 0)
-        else:
-            end_time = steps[-1]['timestamp'] if steps else timeline.get('end', 0)
+                pass
 
         agent_info = result_data.get("agents", {}).get(agent_id, {})
         status = agent_info.get("status", "unknown")
