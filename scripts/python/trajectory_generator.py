@@ -1,4 +1,4 @@
-"""Generate interactive trajectory HTML visualization for fork-based parallel agent execution."""
+"""Generate interactive trajectory HTML visualization for parallel agent execution."""
 
 import html as html_mod
 import json
@@ -6,6 +6,75 @@ import pathlib
 import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
+
+def parse_manager_decisions(agent_dir: pathlib.Path, first_timestamp: Optional[float] = None) -> List[Dict]:
+    """Parse manager decisions from _manager/bedrock_api_calls.jsonl."""
+    mgr_path = agent_dir / "_manager" / "bedrock_api_calls.jsonl"
+    if not mgr_path.is_file():
+        return []
+
+    decisions = []
+    try:
+        with open(mgr_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                call = json.loads(line)
+                if call.get('event') != 'api_call':
+                    continue
+
+                resp = call.get('response', {})
+                blocks = resp.get('content_blocks', [])
+                text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
+
+                # Parse timestamp
+                ts_str = call.get('response_timestamp', '')
+                timestamp = 0.0
+                if ts_str and first_timestamp is not None:
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                        timestamp = dt.timestamp() - first_timestamp
+                    except (ValueError, TypeError):
+                        pass
+
+                # Parse decision type
+                decision_type = 'CONTINUE'
+                if 'SPAWN_HELPER' in text:
+                    decision_type = 'SPAWN_HELPER'
+                elif 'SCOPE_UPDATE' in text:
+                    decision_type = 'SCOPE_UPDATE'
+
+                # Parse assessment fields
+                work_completed = ''
+                parallelism = ''
+                for tl in text.split('\n'):
+                    tl = tl.strip()
+                    if tl.startswith('work_completed:'):
+                        work_completed = tl[15:].strip()
+                    elif tl.startswith('parallelism_opportunity:'):
+                        parallelism = tl[23:].strip()
+
+                # Parse helper task or scope update
+                detail = ''
+                for tl in text.split('\n'):
+                    tl = tl.strip()
+                    if tl.startswith('helper_task:'):
+                        detail = tl[12:].strip()
+                    elif tl.startswith('scope_update:'):
+                        detail = tl[13:].strip()
+
+                decisions.append({
+                    'timestamp': timestamp,
+                    'type': decision_type,
+                    'work_completed': work_completed[:100],
+                    'parallelism': parallelism[:100],
+                    'detail': detail[:150],
+                })
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    return decisions
 
 
 def parse_bedrock_api_calls(local_path: pathlib.Path, agent_dirs: List[Tuple[str, pathlib.Path]]) -> List[Dict]:
@@ -488,35 +557,36 @@ def generate_trajectory_html(
     if agent_data:
         total_duration = max(agent['end'] for agent in agent_data)
 
-    # -- Build action log ---------------------------------------------------
-
-    def classify_action_type(action_text: str, tool_name: str) -> str:
-        """Classify action into communication or regular types."""
-        if tool_name == 'fork_subtask' or action_text.startswith('Fork worker'):
-            return 'fork'
-        elif tool_name == 'message_child' or action_text.startswith('Message to'):
-            return 'message'
-        elif tool_name == 'peek_child' or action_text.startswith('Peek at'):
-            return 'peek'
-        elif 'SUBTASK COMPLETE' in action_text or action_text.startswith('DONE') or action_text.startswith('TASK COMPLETED'):
-            return 'report'
-        else:
-            return 'action'
+    # -- Build action log from step files (not API calls) -------------------
 
     all_actions = []
-    for agent_id, steps_dict in agent_steps_map.items():
-        for step_num in sorted(steps_dict.keys()):
-            step_info = steps_dict[step_num]
-            action_type = classify_action_type(step_info['action'], step_info.get('tool', ''))
+    for agent in agent_data:
+        for step in agent['steps']:
+            # Read action file if available
+            action_text = step.get('thinking', '')[:200]
+            action_type = 'action'
+            if 'SUBTASK COMPLETE' in action_text:
+                action_type = 'report'
             all_actions.append({
-                'timestamp': step_info['timestamp'],
-                'agent': agent_id,
-                'step': step_num,
-                'action': step_info['action'],
+                'timestamp': step['timestamp'],
+                'agent': agent['id'],
+                'step': step['num'],
+                'action': action_text,
                 'type': action_type,
             })
 
     all_actions.sort(key=lambda x: x['timestamp'])
+
+    # -- Collect manager decisions -------------------------------------------
+
+    all_manager_decisions = []
+    for agent_id, agent_dir in agent_dirs:
+        mgr_decisions = parse_manager_decisions(agent_dir, first_timestamp)
+        for d in mgr_decisions:
+            d['agent'] = agent_id
+        all_manager_decisions.extend(mgr_decisions)
+
+    all_manager_decisions.sort(key=lambda x: x['timestamp'])
 
     # -- Build HTML ---------------------------------------------------------
 
@@ -1174,6 +1244,23 @@ h2 {{
         h.append(f"      <div class='timeline-bar-label'>{esc(label)}</div>")
         h.append("    </div>")
 
+    # Add coordination event markers on timeline
+    for decision in all_manager_decisions:
+        if decision['type'] == 'CONTINUE':
+            continue
+        event_pct = (decision['timestamp'] / total_duration * 100) if total_duration > 0 else 0
+        if event_pct < 0 or event_pct > 100:
+            continue
+        if decision['type'] == 'SPAWN_HELPER':
+            marker_style = "background:#a371f7;width:12px;height:12px;border-radius:2px;transform:rotate(45deg) translate(-50%,-50%);"
+            marker_title = f"SPAWN_HELPER by mgr:{decision['agent']}: {decision.get('detail', '')[:80]}"
+        elif decision['type'] == 'SCOPE_UPDATE':
+            marker_style = "background:#f7d058;width:10px;height:10px;border-radius:50%;"
+            marker_title = f"SCOPE_UPDATE to {decision['agent']}: {decision.get('detail', '')[:80]}"
+        else:
+            continue
+        h.append(f"      <div style='position:absolute;left:{event_pct:.1f}%;top:-8px;{marker_style}cursor:pointer;z-index:10;border:1px solid rgba(255,255,255,0.3)' title='{esc(marker_title)}'></div>")
+
     h.append("      <div class='timeline-playhead' id='timeline-playhead' style='left: 0%'></div>")
     h.append("    </div>")
     h.append("  </div>")
@@ -1221,6 +1308,8 @@ h2 {{
     # Tabs
     h.append("<div class='tabs'>")
     h.append("  <div class='tab active' onclick='showTab(\"log\")'>📋 Action Log</div>")
+    if all_manager_decisions:
+        h.append("  <div class='tab' onclick='showTab(\"managers\")'>🧠 Manager Decisions</div>")
     h.append("</div>")
 
     # Action Log
@@ -1259,6 +1348,47 @@ h2 {{
 
     h.append("  </div>")
     h.append("</div>")
+
+    # Manager Decisions tab
+    if all_manager_decisions:
+        h.append("<div id='tab-managers' class='tab-content'>")
+        h.append("  <div class='action-log'>")
+
+        for decision in all_manager_decisions:
+            time_str = fmt_duration(decision['timestamp'])
+            dtype = decision['type']
+
+            # Color-code by decision type
+            if dtype == 'SPAWN_HELPER':
+                css_class = 'fork'
+                icon = '🔀'
+                badge = f'<span style="color:#a371f7;font-weight:700">{dtype}</span>'
+            elif dtype == 'SCOPE_UPDATE':
+                css_class = 'message'
+                icon = '📋'
+                badge = f'<span style="color:#f7d058;font-weight:700">{dtype}</span>'
+            else:
+                css_class = 'action'
+                icon = '✓'
+                badge = f'<span style="color:#8b949e">{dtype}</span>'
+
+            h.append(f"    <div class='action-item {css_class}'>")
+            h.append(f"      <div class='action-time'>{esc(time_str)}</div>")
+            h.append(f"      <div class='action-agent'>mgr:{esc(decision['agent'])}</div>")
+
+            detail_parts = [f"{icon} {badge}"]
+            if decision.get('work_completed'):
+                detail_parts.append(f"<br><small style='color:#8b949e'>Done: {esc(decision['work_completed'])}</small>")
+            if decision.get('parallelism') and decision['parallelism'] != 'none':
+                detail_parts.append(f"<br><small style='color:#a371f7'>Parallelism: {esc(decision['parallelism'])}</small>")
+            if decision.get('detail'):
+                detail_parts.append(f"<br><small style='color:#58a6ff'>→ {esc(decision['detail'])}</small>")
+
+            h.append(f"      <div class='action-detail'>{''.join(detail_parts)}</div>")
+            h.append("    </div>")
+
+        h.append("  </div>")
+        h.append("</div>")
 
     # JavaScript for interactivity
     h.append("<script>")
