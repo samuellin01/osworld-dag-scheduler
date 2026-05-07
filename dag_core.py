@@ -171,11 +171,13 @@ scope_update: <tell the worker what changed and when to declare SUBTASK \
 COMPLETE. Example: "Test 3 is now handled separately. Finish Test 2 and \
 declare SUBTASK COMPLETE with your answers.">
 
-SCOPE_UPDATE — the worker's task scope needs updating WITHOUT spawning a \
-helper. Use when the worker is done but doesn't know it, is wasting steps \
-on unnecessary work, or needs to move on to the next step.
-scope_update: <direct task instruction. Example: "Format analysis is complete. \
-Declare SUBTASK COMPLETE with your format findings.">"""
+SCOPE_UPDATE — coordination-only update to the worker's scope. Use ONLY for:
+  - "Your task is done. Declare SUBTASK COMPLETE."
+  - "Skip X, another agent handles it."
+  - "Move on to the next step."
+Do NOT use to correct the worker's answers, judge format, or provide \
+task-specific content. The worker has the data it needs — trust it.
+scope_update: <coordination directive only>"""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -709,7 +711,7 @@ class Orchestrator:
                 if signal_data:
                     summaries = []
                     for sig_name, data in signal_data.items():
-                        summary = data.get("summary", str(data))[:500] if isinstance(data, dict) else str(data)[:500]
+                        summary = data.get("summary", str(data)) if isinstance(data, dict) else str(data)
                         summaries.append(f"  {sig_name}: {summary}")
                     manager._signal_data_summary = "\n".join(summaries)
 
