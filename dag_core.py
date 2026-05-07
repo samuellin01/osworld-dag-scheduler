@@ -68,6 +68,7 @@ class Phase:
     awaits: List[str] = field(default_factory=list)
     signals: List[str] = field(default_factory=list)
     status: str = "pending"
+    force_complete: bool = False
     result: Optional[Dict[str, Any]] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -203,7 +204,12 @@ whether to wait or proceed. Do NOT suggest specific tool parameters, signal \
 names, file paths, or commands — you don't know the implementation details. \
 Do NOT provide task-specific data or answers. Do NOT repeat a message you \
 already sent (check the list above).
-message_to_worker: <brief directional guidance>"""
+message_to_worker: <brief directional guidance>
+
+FORCE_COMPLETE — the worker has finished its portion of the work and is now \
+doing redundant or duplicate work (e.g., re-reading files a helper already \
+handled). Use this to stop the worker immediately. The worker's results so \
+far will be used. Only use this when the worker's useful work is truly done."""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -441,6 +447,14 @@ class Manager:
                         self._messages_sent.append(message[:100])
                 else:
                     logger.info("%s SPAWN_HELPER but no task parsed", tag)
+
+        elif "FORCE_COMPLETE" in response:
+            phase = self._current_running_phase()
+            if phase:
+                logger.info("%s FORCE_COMPLETE — stopping worker", tag)
+                phase.force_complete = True
+            else:
+                logger.info("%s FORCE_COMPLETE but no running phase", tag)
 
         elif "NUDGE" in response:
             message = ""
