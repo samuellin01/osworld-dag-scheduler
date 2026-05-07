@@ -96,16 +96,6 @@ def run_phase(
     while True:
         step += 1
 
-        # Manager force-complete
-        if phase.force_complete:
-            logger.info("%s Force-completed by manager at step %d", tag, step)
-            return {
-                "status": "DONE",
-                "summary": f"Force-completed by manager. Last: {final_response_text}",
-                "steps_used": step - 1,
-                "duration": time.time() - start_time,
-            }
-
         # Safety cap
         if step > _ABSOLUTE_MAX_STEPS:
             logger.warning("%s Absolute step cap (%d) reached", tag, _ABSOLUTE_MAX_STEPS)
