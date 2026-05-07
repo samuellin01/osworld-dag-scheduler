@@ -441,34 +441,37 @@ class Manager:
                 time.sleep(2)
             logger.info("%s Helper %s finished: %s", tag, helper_id, helper.status)
 
-        # Merge: worker result + all helper results
+        # Collect worker and helper results separately
         worker_summary = ""
         for phase in self.agent.phases:
             if phase.result and phase.result.get("summary"):
                 worker_summary += phase.result["summary"]
 
-        helper_summaries = []
+        helper_results = []
         for helper_id in self._helper_ids:
             helper = self.orchestrator._helpers.get(helper_id)
             if helper and helper.status == "done":
                 for phase in helper.phases:
                     if phase.result and phase.result.get("summary"):
-                        helper_summaries.append(phase.result["summary"])
+                        helper_results.append({
+                            "helper_id": helper_id,
+                            "task": helper.task,
+                            "summary": phase.result["summary"],
+                        })
 
-        merged_summary = worker_summary
-        if helper_summaries:
-            merged_summary += "\n\n--- Additional results from helper agents ---\n\n"
-            merged_summary += "\n\n".join(helper_summaries)
-
-        merged_result = {"status": "DONE", "summary": merged_summary}
-
-        # Set all deferred signals with merged data
+        # Set each deferred signal with clearly labeled data
         for phase in self.agent.phases:
             for signal_name in phase.signals:
                 if self.orchestrator.is_signal_deferred(signal_name):
-                    logger.info("%s Setting deferred signal '%s' with merged data (%d chars)",
-                                 tag, signal_name, len(merged_summary))
-                    self.orchestrator.set_signal(signal_name, merged_result)
+                    # Build signal-specific summary: worker's result first, then each helper labeled
+                    parts = [f"=== Worker ({self.agent.id}) results ===\n{worker_summary}"]
+                    for hr in helper_results:
+                        parts.append(f"\n=== Helper ({hr['helper_id']}) task: {hr['task'][:100]} ===\n{hr['summary']}")
+                    signal_summary = "\n".join(parts)
+
+                    logger.info("%s Setting deferred signal '%s' (%d chars, %d helper results)",
+                                 tag, signal_name, len(signal_summary), len(helper_results))
+                    self.orchestrator.set_signal(signal_name, {"status": "DONE", "summary": signal_summary})
 
 
 # ------------------------------------------------------------------
