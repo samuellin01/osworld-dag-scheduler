@@ -127,9 +127,6 @@ Free displays available for helpers: {idle_displays}
 Helpers you have already spawned (do NOT duplicate):
 {helpers_already_spawned}
 
-Messages you have already sent to the worker (do NOT repeat the same message):
-{messages_already_sent}
-
 Your previous assessment:
 {previous_assessment}
 
@@ -162,29 +159,17 @@ actions it saves from the critical path. If no, write "none". Example:
 
 2. Decide on action — base this on your parallelism_opportunity analysis:
 
-CONTINUE — worker is on track, no parallelism opportunity. Also use this \
-if you already sent a redirect and the worker hasn't responded yet.
+CONTINUE — worker is on track, no parallelism opportunity.
 
 SPAWN_HELPER — your parallelism_opportunity identified an independent chunk \
 worth offloading. Do NOT spawn for work assigned to other agents or already \
 covered by helpers above.
 helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
-message_to_worker: <tell worker to skip that chunk>
 
-REDIRECT — the worker's task scope has changed (e.g., a helper is now \
-handling part of the work) or the worker is doing something outside its \
-scope. Send an updated task directive. Be specific about what the worker \
-should do now and when to declare SUBTASK COMPLETE. Do NOT repeat a \
-message you already sent (check the list above).
-message_to_worker: <updated task directive, e.g., "Your task is now: finish \
-reading Test 2 only. Test 3 is handled by another agent. When you finish \
-Test 2, declare SUBTASK COMPLETE with your answers."
-
-FORCE_COMPLETE — the worker has finished its portion of the work and is now \
-doing redundant or duplicate work (e.g., re-reading files a helper already \
-handled). Use this to stop the worker immediately. The worker's results so \
-far will be used. Only use this when the worker's useful work is truly done."""
+FORCE_COMPLETE — the worker has finished its useful portion and is now doing \
+redundant work (e.g., a helper is already handling the remaining work). \
+Stops the worker immediately. The worker's results so far will be used."""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -216,7 +201,6 @@ class Manager:
         self._assessment = "(no assessment yet — worker just started)"
         self._helpers_spawned: List[str] = []
         self._helper_ids: List[str] = []
-        self._messages_sent: List[str] = []
         self._sibling_info = self._format_siblings(sibling_agents or [])
 
     def run(self):
@@ -291,12 +275,6 @@ class Manager:
         else:
             helpers_text = "(none)"
 
-        # Format messages already sent so the LLM doesn't repeat
-        if self._messages_sent:
-            messages_text = "\n".join(f"  - {m}" for m in self._messages_sent[-5:])
-        else:
-            messages_text = "(none)"
-
         # If at max helpers, don't show idle displays to avoid tempting the LLM
         effective_idle = idle_displays if len(self._helpers_spawned) < MAX_HELPERS_PER_MANAGER else 0
 
@@ -307,7 +285,6 @@ class Manager:
             phase_task=phase.task[:300],
             idle_displays=effective_idle,
             helpers_already_spawned=helpers_text,
-            messages_already_sent=messages_text,
             previous_assessment=self._assessment,
             new_steps=new_steps_text,
             latest_response=phase.latest_response[:2000],
@@ -350,7 +327,7 @@ class Manager:
                     in_assessment = True
                     continue
                 if in_assessment:
-                    if stripped in ("CONTINUE", "SPAWN_HELPER", "REDIRECT", "FORCE_COMPLETE"):
+                    if stripped in ("CONTINUE", "SPAWN_HELPER", "FORCE_COMPLETE"):
                         break
                     assessment_lines.append(stripped)
             if assessment_lines:
@@ -389,7 +366,6 @@ class Manager:
             else:
                 helper_task = ""
                 helper_setup: List[Dict[str, Any]] = []
-                message = ""
 
                 for line in response.split("\n"):
                     line = line.strip()
@@ -403,12 +379,9 @@ class Manager:
                                 helper_setup = [parsed] if isinstance(parsed, dict) else parsed
                             except json.JSONDecodeError:
                                 pass
-                    elif line.startswith("message_to_worker:"):
-                        message = line[len("message_to_worker:"):].strip()
 
                 if helper_task:
                     logger.info("%s SPAWN_HELPER: %s", tag, helper_task[:100])
-                    # Defer parent signals — we'll merge helper results before setting
                     phase = self._current_running_phase()
                     if phase:
                         for sig in phase.signals:
@@ -417,9 +390,6 @@ class Manager:
                     if helper_id:
                         self._helper_ids.append(helper_id)
                         self._helpers_spawned.append(f"{helper_id}: {helper_task[:80]}")
-                    if message:
-                        self.orchestrator.send_message(self.agent.id, message)
-                        self._messages_sent.append(message[:100])
                 else:
                     logger.info("%s SPAWN_HELPER but no task parsed", tag)
 
@@ -430,17 +400,6 @@ class Manager:
                 phase.force_complete = True
             else:
                 logger.info("%s FORCE_COMPLETE but no running phase", tag)
-
-        elif "REDIRECT" in response:
-            message = ""
-            for line in response.split("\n"):
-                line = line.strip()
-                if line.startswith("message_to_worker:"):
-                    message = line[len("message_to_worker:"):].strip()
-            if message:
-                logger.info("%s REDIRECT: %s", tag, message[:100])
-                self.orchestrator.send_message(self.agent.id, message)
-                self._messages_sent.append(message[:100])
 
         elif "CONTINUE" in response:
             logger.info("%s CONTINUE", tag)
