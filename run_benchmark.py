@@ -542,7 +542,7 @@ def run_single_task(task_data, args, output_base):
             "instruction": instruction,
             "plan": dag_plan,
             "num_agents": len(dag.agents),
-            "num_signals": len(dag.signals),
+            "num_agents": len(dag.agents),
         }
         json.dump(plan_data, f, indent=2)
 
