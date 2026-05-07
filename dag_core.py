@@ -68,7 +68,6 @@ class Phase:
     awaits: List[str] = field(default_factory=list)
     signals: List[str] = field(default_factory=list)
     status: str = "pending"
-    force_complete: bool = False
     result: Optional[Dict[str, Any]] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -166,10 +165,9 @@ worth offloading. Do NOT spawn for work assigned to other agents or already \
 covered by helpers above.
 helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
-
-FORCE_COMPLETE — the worker has finished its useful portion and is now doing \
-redundant work (e.g., a helper is already handling the remaining work). \
-Stops the worker immediately. The worker's results so far will be used."""
+scope_update: <tell the worker what to skip and when to declare SUBTASK \
+COMPLETE. Example: "Test 3 is now handled separately. Finish Test 2 and \
+declare SUBTASK COMPLETE with your answers.">"""
 
 
 MAX_HELPERS_PER_MANAGER = 3
@@ -327,7 +325,7 @@ class Manager:
                     in_assessment = True
                     continue
                 if in_assessment:
-                    if stripped in ("CONTINUE", "SPAWN_HELPER", "FORCE_COMPLETE"):
+                    if stripped in ("CONTINUE", "SPAWN_HELPER"):
                         break
                     assessment_lines.append(stripped)
             if assessment_lines:
@@ -380,6 +378,12 @@ class Manager:
                             except json.JSONDecodeError:
                                 pass
 
+                scope_update = ""
+                for line in response.split("\n"):
+                    line = line.strip()
+                    if line.startswith("scope_update:"):
+                        scope_update = line[len("scope_update:"):].strip()
+
                 if helper_task:
                     logger.info("%s SPAWN_HELPER: %s", tag, helper_task[:100])
                     phase = self._current_running_phase()
@@ -390,16 +394,11 @@ class Manager:
                     if helper_id:
                         self._helper_ids.append(helper_id)
                         self._helpers_spawned.append(f"{helper_id}: {helper_task[:80]}")
+                    if scope_update:
+                        logger.info("%s Scope update -> worker: %s", tag, scope_update[:100])
+                        self.orchestrator.send_message(self.agent.id, scope_update)
                 else:
                     logger.info("%s SPAWN_HELPER but no task parsed", tag)
-
-        elif "FORCE_COMPLETE" in response:
-            phase = self._current_running_phase()
-            if phase:
-                logger.info("%s FORCE_COMPLETE — stopping worker", tag)
-                phase.force_complete = True
-            else:
-                logger.info("%s FORCE_COMPLETE but no running phase", tag)
 
         elif "CONTINUE" in response:
             logger.info("%s CONTINUE", tag)
