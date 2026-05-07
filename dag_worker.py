@@ -1,15 +1,17 @@
-"""Per-phase CUA worker execution.
+"""Pure CUA worker execution.
 
-The worker is a pure screen executor. It has two tools:
-  - computer: interact with the screen
-  - await_signal: block mid-loop until another agent's data arrives
+The worker is a focused screen executor. It knows:
+  - Its specific task (narrow, self-contained)
+  - How to interact with the display (computer tool)
+  - When to declare COMPLETE or FAILED
 
-The worker does NOT make parallelism decisions. Its manager (running
-in a separate thread) watches the step history and handles that.
+The worker does NOT know about:
+  - The overall task or other agents
+  - Signals, coordination, or data flow
+  - Why it's doing what it's doing
 
-No hard step limit. The worker runs until it says COMPLETE or FAILED.
-The task-level timeout is the hard wall. The manager can nudge the
-worker to wrap up via messages.
+The manager handles the big picture: when to stop, what to skip,
+injecting data via messages, spawning helpers. The worker just works.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import anthropic
 
 from agent_utils import COMPUTER_USE_TOOL, _resize_screenshot, parse_computer_use_actions
-from dag_core import AgentPlan, Phase, StepRecord, AWAIT_SIGNAL_TOOL
+from dag_core import AgentPlan, Phase, StepRecord
 from fork_agent import XvfbDisplay
 
 if TYPE_CHECKING:
@@ -36,7 +38,6 @@ logger = logging.getLogger(__name__)
 _COMPLETION = re.compile(r'\b(PHASE\s+COMPLETE|SUBTASK\s+COMPLETE)\b', re.IGNORECASE)
 _FAILURE = re.compile(r'\b(PHASE\s+FAILED|SUBTASK\s+FAILED)\b', re.IGNORECASE)
 
-# Safety cap so a single phase can't loop forever if COMPLETE is never emitted
 _ABSOLUTE_MAX_STEPS = 200
 
 
@@ -57,40 +58,28 @@ def run_phase(
     tag = f"[{agent.id}/{phase.id}]"
     display_num = agent.display_num or 0
     display = XvfbDisplay(vm_ip, server_port, display_num)
-    # Only show signals this agent's phases actually await — prevents deadlocks
-    # The planner determines WHAT depends on WHAT. The tool gives flexibility on WHEN to block.
-    available_signals = None
-    if orchestrator:
-        awaitable = set()
-        for p in agent.phases:
-            awaitable.update(p.awaits)
-        available_signals = sorted(awaitable) if awaitable else None
-    system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data,
-                                          has_orchestrator=orchestrator is not None,
-                                          available_signals=available_signals)
+    system_prompt = _build_system_prompt(agent, phase, phase_index, password, signal_data)
     tools: List[Any] = [COMPUTER_USE_TOOL]
-    if orchestrator and available_signals:
-        tools.append(AWAIT_SIGNAL_TOOL)
-
     resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
     is_continuation = phase_index > 0
 
     if is_continuation:
-        initial_text = f"Continue on the same display. Your current phase:\n{phase.task}"
+        initial_text = f"Continue on the same display. Your current task:\n{phase.task}"
         prev_phase = agent.phases[phase_index - 1]
         if prev_phase.result and prev_phase.result.get("summary"):
-            initial_text += f"\n\nContext from your previous phase ({prev_phase.id}):\n"
+            initial_text += f"\n\nContext from previous work:\n"
             initial_text += prev_phase.result["summary"][:2000]
-            initial_text += "\n\nThe display state carries over — do NOT redo work from the previous phase."
+            initial_text += "\n\nThe display carries over — do NOT redo previous work."
     else:
         initial_text = f"Your task:\n{phase.task}"
 
+    # Inject data from completed dependencies (phase-level awaits, resolved by orchestrator)
     if signal_data:
-        initial_text += "\n\nData from other agents:\n"
+        initial_text += "\n\nData you need:\n"
         for sig_name, data in signal_data.items():
             summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
-            initial_text += f"  [{sig_name}]: {summary}\n"
-        initial_text += "\nUse this data to complete your phase."
+            initial_text += f"{summary}\n"
+        initial_text += "\nUse this data. Do NOT redo work that produced it."
 
     phase_output = os.path.join(output_dir, phase.id)
     os.makedirs(phase_output, exist_ok=True)
@@ -147,7 +136,7 @@ def run_phase(
             obs_content.insert(0, tr)
         pending_tool_results.clear()
 
-        # Inject manager/orchestrator messages
+        # Inject manager messages
         if orchestrator:
             pending = orchestrator.get_pending_messages(agent.id)
             if pending:
@@ -221,36 +210,11 @@ def run_phase(
                     "content": "Action executed.",
                 })
 
-            elif tool_name == "await_signal" and orchestrator:
-                signal_name = tool_input.get("signal_name", "")
-                logger.info("%s await_signal('%s') — blocking", tag, signal_name)
-                step_action_summary = f"await_signal({signal_name})"
-
-                remaining_timeout = None
-                if orchestrator._start_time:
-                    remaining_timeout = max(1.0, orchestrator.task_timeout - (time.time() - orchestrator._start_time))
-
-                data = orchestrator.wait_signal(signal_name, timeout=remaining_timeout)
-
-                if data is None or orchestrator.is_signal_failed(signal_name):
-                    result_content = json.dumps({"error": f"Signal '{signal_name}' failed or timed out"})
-                    logger.warning("%s await_signal('%s') — failed", tag, signal_name)
-                else:
-                    summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
-                    result_content = summary
-                    logger.info("%s await_signal('%s') — received %d chars", tag, signal_name, len(result_content))
-
-                pending_tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": result_content,
-                })
-
             else:
                 pending_tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_id,
-                    "content": f"Unknown tool: {tool_name}",
+                    "content": f"Unknown tool: {tool_name}. You only have the 'computer' tool.",
                 })
 
         # Record step in history (manager reads this)
@@ -298,12 +262,9 @@ def _build_system_prompt(
     phase_index: int,
     password: str,
     signal_data: Optional[Dict[str, Any]],
-    has_orchestrator: bool = False,
-    available_signals: Optional[List[str]] = None,
 ) -> str:
     display_num = agent.display_num or 0
     chrome_port = 1337 + display_num
-    is_last_phase = phase_index == len(agent.phases) - 1
     is_continuation = phase_index > 0
 
     prompt = (
@@ -318,54 +279,33 @@ def _build_system_prompt(
 
     if is_continuation:
         prompt += (
-            "**DISPLAY CONTINUITY**: Your display carries over from the previous phase. "
+            "**DISPLAY CONTINUITY**: Your display carries over from previous work. "
             "Windows and tabs are already open. Do NOT re-launch applications. "
             "Review the current screen and continue.\n\n"
         )
     else:
         prompt += "Your display has been prepared with the necessary applications.\n\n"
 
-    if has_orchestrator:
-        prompt += (
-            "**COLLABORATION TOOL**:\n"
-            "- `await_signal(signal_name)`: Block until data from another agent is ready. "
-            "Do your independent setup work first (open apps, navigate), then call this "
-            "only when you actually need the data. Returns the data as the tool result.\n"
-        )
-        if available_signals:
-            prompt += f"\n  Available signals you can await: {', '.join(available_signals)}\n"
-        prompt += (
-            "\nYour manager may send you messages during execution (shown as [MANAGER]: ...). "
-            "Follow their instructions — they have visibility into the overall task and may "
-            "tell you to skip certain work because a helper agent is handling it.\n\n"
-        )
-
-    if signal_data:
-        prompt += "**Data from other agents** (received via signals):\n"
-        for sig_name, data in signal_data.items():
-            summary = data.get("summary", str(data))[:4000] if isinstance(data, dict) else str(data)[:4000]
-            prompt += f"  [{sig_name}]: {summary}\n"
-        prompt += "\nUse this data. Do NOT redo work that other agents already completed.\n\n"
+    prompt += (
+        "Your manager may send you messages during execution (shown as [MANAGER]: ...). "
+        "Follow their instructions — they can see things you can't.\n\n"
+    )
 
     if phase.signals:
         prompt += (
-            "**IMPORTANT**: When you complete this phase, include a detailed summary of "
-            "your results and any key data (values, findings, URLs) because another agent "
-            "is waiting for this information.\n\n"
+            "When you complete your task, include a detailed summary of your results "
+            "and any key data (values, findings, URLs).\n\n"
         )
 
-    completion_kw = "SUBTASK COMPLETE" if is_last_phase else "PHASE COMPLETE"
-    failure_kw = "SUBTASK FAILED" if is_last_phase else "PHASE FAILED"
-
     prompt += (
-        f"When done, output {completion_kw} followed by a summary.\n"
-        f"If you cannot complete this, output {failure_kw} with explanation.\n\n"
+        "When done, output SUBTASK COMPLETE followed by a summary of what you accomplished.\n"
+        "If you cannot complete the task, output SUBTASK FAILED with explanation.\n\n"
         "**If setup failed** — empty desktop or wrong app on first screenshot:\n"
-        f"{failure_kw}: Setup did not work. Display shows [describe what you see].\n\n"
+        "SUBTASK FAILED: Setup did not work. Display shows [describe what you see].\n\n"
         "Google Docs/Sheets/Slides: multiple agents can open the same URL simultaneously.\n"
         "Google Workspace: Do NOT use Apps Script — complete tasks through the UI.\n"
-        "Google Sheets: Use the Name Box (top-left) to jump to cells. Batch with Tab/Enter.\n\n"
-        "Verify you've completed the work before declaring completion."
+        "Google Sheets: Use the Name Box (top-left) to jump to cells.\n\n"
+        "Focus only on your assigned task. Do not do extra work beyond what was asked."
     )
 
     return prompt
