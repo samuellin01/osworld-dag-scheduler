@@ -1,23 +1,23 @@
-"""Core data structures and orchestrator for signal/await parallel execution.
+"""Core data structures and orchestrator for agent-level data flow.
 
 Architecture:
-  Orchestrator (plan, signals, displays, task timeout)
-  ├── Manager A (LLM, watches every step, spawns helpers, messages worker)
+  Orchestrator (plan, agent dependencies, displays, task timeout)
+  ├── Manager A (watches every step, spawns helpers, scope updates)
   │   └── Worker A (CUA: computer only, task-focused)
   ├── Manager B
   │   └── Worker B
   │
   │  (Manager A spawns helper at runtime)
-  ├── Manager H1
+  ├── Manager H1 (auto-added as dependency to downstream phases)
   │   └── Helper Worker 1
 
-  - Orchestrator owns the plan, signals, and display allocation
-  - Each agent gets a Manager that watches its worker's every step
-  - Manager maintains a running assessment: work done, work remaining, pace
-  - Manager spawns helpers when it sees separable remaining work
-  - Manager messages worker to narrow focus ("helper is handling X, skip it")
-  - Worker is a pure CUA executor (computer tool only, task-focused)
-  - No hard step limits — manager nudges, task timeout is the wall
+Data flow:
+  - Each phase declares depends_on: list of agent IDs it needs data from
+  - When all dependency agents complete, the phase unblocks
+  - Each agent's result is injected separately and labeled by agent ID
+  - When a manager spawns a helper, the helper is automatically added
+    as a dependency to downstream phases that depend on the parent agent
+  - No named signals. No merging. Each piece of data has one clear source.
 """
 
 from __future__ import annotations
@@ -41,17 +41,6 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 @dataclass
-class Signal:
-    """A named data channel between agents."""
-    name: str
-    producer: str
-    data: Optional[Dict[str, Any]] = None
-    is_set: bool = False
-    failed: bool = False
-    error: Optional[str] = None
-
-
-@dataclass
 class StepRecord:
     """One step of a worker's execution, visible to its manager."""
     step_num: int
@@ -65,8 +54,7 @@ class Phase:
     """A phase of work within an agent. Phases run sequentially on the same display."""
     id: str
     task: str
-    awaits: List[str] = field(default_factory=list)
-    signals: List[str] = field(default_factory=list)
+    depends_on: List[str] = field(default_factory=list)
     status: str = "pending"
     result: Optional[Dict[str, Any]] = None
     start_time: Optional[float] = None
@@ -91,15 +79,14 @@ class AgentPlan:
 
 @dataclass
 class DAGPlan:
-    """The full execution plan: agents + signals."""
+    """The full execution plan: agents + dependencies."""
     agents: Dict[str, AgentPlan] = field(default_factory=dict)
-    signals: Dict[str, Signal] = field(default_factory=dict)
     root_task: str = ""
     created_at: float = field(default_factory=time.time)
 
 
 # ------------------------------------------------------------------
-# Manager: per-agent supervisor
+# Manager prompt
 # ------------------------------------------------------------------
 
 _MANAGER_PROMPT = """\
@@ -122,7 +109,7 @@ Other agents working on this task (handled by their own managers — NOT your sc
 Your worker's assigned task: {agent_task}
 Current phase: {phase_task}
 Data the worker received at phase start (from completed dependencies):
-{signal_data_summary}
+{dependency_data_summary}
 Free displays available for helpers: {idle_displays}
 
 Helpers you have already spawned (do NOT duplicate):
@@ -167,9 +154,6 @@ worth offloading. Do NOT spawn for work assigned to other agents or already \
 covered by helpers above.
 helper_task: <the independent chunk as a self-contained task>
 helper_setup: <"none" or a JSON setup action>
-helper_signal: <if this worker's phase produces multiple signals, which \
-signal should the helper's result go to? The helper becomes the producer \
-of this signal. Example: "test3_answers". Write "none" if not applicable.>
 scope_update: <tell the worker what changed and when to declare SUBTASK \
 COMPLETE. Example: "Test 3 is now handled separately. Finish Test 2 and \
 declare SUBTASK COMPLETE with your answers.">
@@ -191,9 +175,7 @@ class Manager:
 
     Runs in its own thread alongside the worker. Processes each new step,
     maintains a running assessment of progress, and intervenes when needed
-    (spawn helpers, message worker, nudge).
-
-    Scoped to its own worker's task only — does not try to help other agents.
+    (spawn helpers, scope updates).
     """
 
     def __init__(
@@ -213,10 +195,10 @@ class Manager:
         self._helpers_spawned: List[str] = []
         self._helper_ids: List[str] = []
         self._sibling_info = self._format_siblings(sibling_agents or [])
-        self._signal_data_summary = "(none — worker has no dependency data yet)"
+        self._dependency_data_summary = "(none — worker has no dependency data yet)"
 
     def run(self):
-        """Main loop: watch steps, evaluate, then merge helper results if any."""
+        """Main loop: watch steps, evaluate, intervene."""
         tag = f"[mgr:{self.agent.id}]"
         logger.info("%s Manager started", tag)
 
@@ -256,18 +238,11 @@ class Manager:
             lines.append(f"  - {s.id}: {s.task}")
         return "\n".join(lines)
 
-    def _format_new_steps(self, new_steps: List[StepRecord]) -> str:
-        lines = []
-        for rec in new_steps:
-            lines.append(f"  step {rec.step_num} (+{rec.elapsed:.0f}s, {rec.elapsed - (new_steps[0].elapsed if new_steps[0] != rec else 0):.0f}s since prev): {rec.action_summary}")
-        return "\n".join(lines) if lines else "(none)"
-
     def _evaluate(self, phase: Phase, new_steps: List[StepRecord], tag: str):
         total_steps = phase.current_step
         total_elapsed = new_steps[-1].elapsed if new_steps else 0
         idle_displays = self.orchestrator.display_pool.get_idle_count()
 
-        # Format new steps with inter-step latency
         step_lines = []
         for i, rec in enumerate(new_steps):
             if i > 0:
@@ -277,13 +252,11 @@ class Manager:
             step_lines.append(f"  step {rec.step_num} (+{rec.elapsed:.0f}s{delta}): {rec.action_summary}")
         new_steps_text = "\n".join(step_lines) if step_lines else "(none)"
 
-        # Format already-spawned helpers so the LLM doesn't repeat
         if self._helpers_spawned:
             helpers_text = "\n".join(f"  - {h}" for h in self._helpers_spawned)
         else:
             helpers_text = "(none)"
 
-        # If at max helpers, don't show idle displays to avoid tempting the LLM
         effective_idle = idle_displays if len(self._helpers_spawned) < MAX_HELPERS_PER_MANAGER else 0
 
         prompt = _MANAGER_PROMPT.format(
@@ -291,7 +264,7 @@ class Manager:
             sibling_agents=self._sibling_info,
             agent_task=self.agent.task[:300],
             phase_task=phase.task[:300],
-            signal_data_summary=self._signal_data_summary,
+            dependency_data_summary=self._dependency_data_summary,
             idle_displays=effective_idle,
             helpers_already_spawned=helpers_text,
             previous_assessment=self._assessment,
@@ -342,11 +315,11 @@ class Manager:
             if assessment_lines:
                 self._assessment = "\n".join(assessment_lines)
 
-            # Parse and log structured predictions
+            # Log key fields
             work_completed = ""
             remaining_actions = []
-            total_est = ""
             parallelism = ""
+            total_est = ""
             in_remaining = False
             for line in assessment_lines:
                 if line.startswith("work_completed:"):
@@ -375,7 +348,6 @@ class Manager:
             else:
                 helper_task = ""
                 helper_setup: List[Dict[str, Any]] = []
-                helper_signal = ""
                 scope_update = ""
 
                 for line in response.split("\n"):
@@ -390,26 +362,14 @@ class Manager:
                                 helper_setup = [parsed] if isinstance(parsed, dict) else parsed
                             except json.JSONDecodeError:
                                 pass
-                    elif line.startswith("helper_signal:"):
-                        sig = line[len("helper_signal:"):].strip().strip('"').strip("'")
-                        if sig.lower() != "none":
-                            helper_signal = sig
                     elif line.startswith("scope_update:"):
                         scope_update = line[len("scope_update:"):].strip()
 
                 if helper_task:
-                    logger.info("%s SPAWN_HELPER: %s (signal=%s)", tag, helper_task[:100], helper_signal or "none")
-
-                    # Reassign the helper_signal from parent to helper
-                    phase = self._current_running_phase()
-                    helper_signals = []
-                    if helper_signal and phase and helper_signal in phase.signals:
-                        phase.signals.remove(helper_signal)
-                        helper_signals = [helper_signal]
-                        logger.info("%s Reassigned signal '%s' from worker to helper", tag, helper_signal)
+                    logger.info("%s SPAWN_HELPER: %s", tag, helper_task[:100])
 
                     helper_id = self.orchestrator.spawn_helper(
-                        helper_task, helper_setup, signals=helper_signals
+                        helper_task, helper_setup, parent_agent_id=self.agent.id
                     )
                     if helper_id:
                         self._helper_ids.append(helper_id)
@@ -436,19 +396,20 @@ class Manager:
         else:
             logger.info("%s No clear action in response", tag)
 
-    # No _wait_and_merge needed — helpers set their own signals directly via signal reassignment
-
 
 # ------------------------------------------------------------------
 # Orchestrator
 # ------------------------------------------------------------------
 
 class Orchestrator:
-    """Signal/await orchestrator with per-agent managers.
+    """Agent-level data flow orchestrator with per-agent managers.
 
-    Owns the plan, signals, and display allocation. Does NOT have a
-    global monitor — each agent gets its own Manager that watches
-    every step and handles interventions.
+    Coordination model:
+      - Each phase declares depends_on: list of agent IDs
+      - When all dependency agents complete, the phase unblocks
+      - Each agent's result is injected separately, labeled by agent ID
+      - When a manager spawns a helper, it's auto-added as a dependency
+        to downstream phases that depend on the parent agent
     """
 
     def __init__(
@@ -476,9 +437,13 @@ class Orchestrator:
         self.password = password
 
         self._lock = threading.RLock()
-        self._signal_events: Dict[str, threading.Event] = {
-            name: threading.Event() for name in plan.signals
+        # Agent completion events: agent_id -> Event (set when agent completes)
+        self._agent_done_events: Dict[str, threading.Event] = {
+            agent_id: threading.Event() for agent_id in plan.agents
         }
+        # Agent results: agent_id -> result dict
+        self._agent_results: Dict[str, Dict[str, Any]] = {}
+
         self._agent_threads: Dict[str, threading.Thread] = {}
         self._manager_threads: Dict[str, threading.Thread] = {}
         self._bedrock_clients: Dict[str, Any] = {}
@@ -494,55 +459,40 @@ class Orchestrator:
             return dict(self._bedrock_clients)
 
     # ------------------------------------------------------------------
-    # Signal operations
+    # Agent completion tracking
     # ------------------------------------------------------------------
 
-    def set_signal(self, name: str, data: Dict[str, Any]):
+    def mark_agent_done(self, agent_id: str, result: Dict[str, Any]):
+        """Mark an agent as complete and store its result."""
         with self._lock:
-            signal = self.plan.signals.get(name)
-            if not signal:
-                logger.error("Unknown signal: %s", name)
-                return
-            signal.data = data
-            signal.is_set = True
-            logger.info("Signal '%s' set by %s", name, signal.producer)
-        self._signal_events[name].set()
+            self._agent_results[agent_id] = result
+            logger.info("Agent '%s' completed with %d chars of data", agent_id, len(result.get("summary", "")))
+        event = self._agent_done_events.get(agent_id)
+        if event:
+            event.set()
 
-    def fail_signal(self, name: str, error: str):
+    def mark_agent_failed(self, agent_id: str, error: str):
+        """Mark an agent as failed."""
         with self._lock:
-            signal = self.plan.signals.get(name)
-            if not signal:
-                return
-            signal.failed = True
-            signal.error = error
-            logger.warning("Signal '%s' failed: %s", name, error)
-        self._signal_events[name].set()
+            self._agent_results[agent_id] = {"status": "FAIL", "summary": f"Agent failed: {error}"}
+        event = self._agent_done_events.get(agent_id)
+        if event:
+            event.set()
 
-    def wait_signal(self, name: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        event = self._signal_events.get(name)
+    def wait_for_agent(self, agent_id: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Block until an agent completes. Returns its result."""
+        event = self._agent_done_events.get(agent_id)
         if not event:
-            logger.error("Unknown signal: %s", name)
+            logger.error("Unknown agent: %s", agent_id)
             return None
         event.wait(timeout=timeout)
         with self._lock:
-            signal = self.plan.signals.get(name)
-            if not signal or signal.failed:
-                return None
-            return signal.data
+            return self._agent_results.get(agent_id)
 
-    def is_signal_failed(self, name: str) -> bool:
+    def is_agent_failed(self, agent_id: str) -> bool:
         with self._lock:
-            signal = self.plan.signals.get(name)
-            return signal.failed if signal else True
-
-    def register_signal(self, name: str, producer: str):
-        with self._lock:
-            if name not in self.plan.signals:
-                self.plan.signals[name] = Signal(name=name, producer=producer)
-                self._signal_events[name] = threading.Event()
-                logger.info("Registered dynamic signal '%s' (producer=%s)", name, producer)
-
-    # Signal deferral removed — helpers set their own signals directly via signal reassignment
+            result = self._agent_results.get(agent_id)
+            return result is not None and result.get("status") == "FAIL"
 
     # ------------------------------------------------------------------
     # Messaging
@@ -562,14 +512,15 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def spawn_helper(self, task: str, setup: Optional[List[Dict[str, Any]]] = None,
-                     signals: Optional[List[str]] = None) -> Optional[str]:
+                     parent_agent_id: Optional[str] = None) -> Optional[str]:
+        """Spawn a helper agent and add it as a dependency to downstream phases."""
         self._helper_count += 1
         helper_id = f"helper_{self._helper_count}"
 
         helper = AgentPlan(
             id=helper_id,
             task=task,
-            phases=[Phase(id="execute", task=task, signals=signals or [])],
+            phases=[Phase(id="execute", task=task)],
             setup=setup or [],
         )
 
@@ -582,6 +533,18 @@ class Orchestrator:
 
         with self._lock:
             self._helpers[helper_id] = helper
+            # Register completion event for the helper
+            self._agent_done_events[helper_id] = threading.Event()
+
+            # Auto-add helper as dependency to downstream phases that depend on parent
+            if parent_agent_id:
+                all_agents = list(self.plan.agents.values()) + list(self._helpers.values())
+                for agent in all_agents:
+                    for phase in agent.phases:
+                        if parent_agent_id in phase.depends_on and helper_id not in phase.depends_on:
+                            phase.depends_on.append(helper_id)
+                            logger.info("Auto-added %s as dependency to %s/%s",
+                                         helper_id, agent.id, phase.id)
 
         thread = threading.Thread(
             target=self._run_agent_thread,
@@ -619,7 +582,7 @@ class Orchestrator:
             with self._lock:
                 self._bedrock_clients[agent.id] = worker_bedrock
 
-            # Start manager in its own thread
+            # Start manager
             manager_output = os.path.join(agent_output, "_manager")
             os.makedirs(manager_output, exist_ok=True)
             manager_bedrock = self.bedrock_factory(manager_output, f"mgr_{agent.id}")
@@ -644,36 +607,37 @@ class Orchestrator:
 
                 logger.info("%s Phase %d/%d: %s", tag, i + 1, len(agent.phases), phase.id)
 
-                signal_data: Dict[str, Any] = {}
-                if phase.awaits:
+                # Wait for all dependency agents to complete
+                dependency_data: Dict[str, Dict[str, Any]] = {}
+                if phase.depends_on:
                     phase.status = "blocked"
-                    logger.info("%s Awaiting signals: %s", tag, phase.awaits)
+                    logger.info("%s Waiting for dependencies: %s", tag, phase.depends_on)
 
-                    for signal_name in phase.awaits:
+                    for dep_agent_id in phase.depends_on:
                         remaining = None
                         if self._start_time:
                             remaining = max(1.0, self.task_timeout - (time.time() - self._start_time))
 
-                        data = self.wait_signal(signal_name, timeout=remaining)
+                        result = self.wait_for_agent(dep_agent_id, timeout=remaining)
 
-                        if self.is_signal_failed(signal_name):
+                        if self.is_agent_failed(dep_agent_id):
                             phase.status = "failed"
-                            phase.result = {"error": f"Awaited signal '{signal_name}' failed"}
-                            raise RuntimeError(f"Signal '{signal_name}' failed")
-                        if data is None:
+                            phase.result = {"error": f"Dependency '{dep_agent_id}' failed"}
+                            raise RuntimeError(f"Dependency '{dep_agent_id}' failed")
+                        if result is None:
                             phase.status = "failed"
-                            phase.result = {"error": f"Timeout waiting for signal '{signal_name}'"}
-                            raise TimeoutError(f"Signal '{signal_name}' timed out")
+                            phase.result = {"error": f"Timeout waiting for '{dep_agent_id}'"}
+                            raise TimeoutError(f"Dependency '{dep_agent_id}' timed out")
 
-                        signal_data[signal_name] = data
+                        dependency_data[dep_agent_id] = result
 
-                # Update manager with signal data so it knows what the worker received
-                if signal_data:
+                # Update manager with dependency data
+                if dependency_data:
                     summaries = []
-                    for sig_name, data in signal_data.items():
+                    for dep_id, data in dependency_data.items():
                         summary = data.get("summary", str(data)) if isinstance(data, dict) else str(data)
-                        summaries.append(f"  {sig_name}: {summary}")
-                    manager._signal_data_summary = "\n".join(summaries)
+                        summaries.append(f"  [{dep_id}]: {summary}")
+                    manager._dependency_data_summary = "\n".join(summaries)
 
                 phase.status = "running"
                 phase.start_time = time.time()
@@ -689,7 +653,7 @@ class Orchestrator:
                     model=self.model,
                     output_dir=agent_output,
                     password=self.password,
-                    signal_data=signal_data if signal_data else None,
+                    signal_data=dependency_data if dependency_data else None,
                     orchestrator=self,
                 )
 
@@ -698,12 +662,8 @@ class Orchestrator:
 
                 if result.get("status") in ("DONE",):
                     phase.status = "done"
-                    for signal_name in phase.signals:
-                        self.set_signal(signal_name, result)
                 else:
                     phase.status = "failed"
-                    for signal_name in phase.signals:
-                        self.fail_signal(signal_name, f"Phase {phase.id} failed")
                     raise RuntimeError(f"Phase {phase.id} failed: {result.get('summary', 'unknown')[:200]}")
 
             agent.status = "done"
@@ -711,16 +671,15 @@ class Orchestrator:
             duration = agent.end_time - (agent.start_time or agent.end_time)
             logger.info("%s Completed all %d phases (%.1fs)", tag, len(agent.phases), duration)
 
+            # Mark agent as done — use last phase's result as agent result
+            last_result = agent.phases[-1].result if agent.phases else {"status": "DONE", "summary": ""}
+            self.mark_agent_done(agent.id, last_result)
+
         except Exception as e:
             logger.error("%s Failed: %s", tag, e, exc_info=True)
             agent.status = "failed"
             agent.end_time = time.time()
-            for phase in agent.phases:
-                for signal_name in phase.signals:
-                    with self._lock:
-                        signal = self.plan.signals.get(signal_name)
-                        if signal and not signal.is_set:
-                            self.fail_signal(signal_name, str(e))
+            self.mark_agent_failed(agent.id, str(e))
 
         finally:
             if agent.display_num is not None:
@@ -733,17 +692,14 @@ class Orchestrator:
     def run(self) -> Dict[str, Any]:
         self._start_time = time.time()
         num_agents = len(self.plan.agents)
-        logger.info("Orchestrator starting: %d agents, %d signals",
-                     num_agents, len(self.plan.signals))
+        logger.info("Orchestrator starting: %d agents", num_agents)
 
         for agent in self.plan.agents.values():
             display_num = self.display_pool.allocate(agent_id=agent.id)
             if display_num is None:
                 logger.error("No display available for agent %s", agent.id)
                 agent.status = "failed"
-                for phase in agent.phases:
-                    for sig in phase.signals:
-                        self.fail_signal(sig, "no display available")
+                self.mark_agent_failed(agent.id, "no display available")
                 continue
 
             agent.display_num = display_num
@@ -757,7 +713,7 @@ class Orchestrator:
             thread.start()
             logger.info("Started agent %s on display :%d", agent.id, display_num)
 
-        # Wait for all threads (agents + dynamically spawned helpers)
+        # Wait for all threads (including dynamically spawned helpers)
         deadline = self._start_time + self.task_timeout
         while time.time() < deadline:
             with self._lock:
