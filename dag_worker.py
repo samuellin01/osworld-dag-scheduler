@@ -344,3 +344,5 @@ def _save_action(phase_output: str, step: int, tool_input: Dict[str, Any]):
     text = _action_summary(tool_input)
     with open(os.path.join(phase_output, f"step_{step:03d}_action.txt"), "w") as f:
         f.write(text)
+    with open(os.path.join(phase_output, f"step_{step:03d}_action.json"), "w") as f:
+        json.dump(tool_input, f)
