@@ -1,12 +1,14 @@
 """Simple orchestrator for multi-agent computer-use tasks.
 
-Breaks a task into subtasks, assigns each to a subagent on its own display,
-and monitors progress until completion or timeout.
+The orchestrator is the hub. It:
+  1. Plans subtasks from a task description
+  2. Assigns subtasks to subagents on separate displays
+  3. Collects results when subagents finish
+  4. Decides what to do next: assign new subtasks, forward data, or finish
+  5. Can send instructions to running agents to redirect them
 
-  Orchestrator
-  |- SubAgent A (display :2) -- CUA loop for its subtask
-  |- SubAgent B (display :3) -- CUA loop for its subtask
-  |- Monitor thread -- logs progress periodically
+Subagents only act when given a subtask. When they finish, they report
+back and wait. The orchestrator decides everything.
 """
 
 from __future__ import annotations
@@ -84,6 +86,38 @@ return a single subtask.
 - Each agent should include a detailed summary of its results when it completes.
 
 Output ONLY the JSON object, no other text."""
+
+
+_ORCHESTRATOR_PROMPT = """\
+You are the orchestrator for a multi-agent computer-use system. Agents work on \
+subtasks across separate virtual displays and report results back to you.
+
+Overall task: {root_task}
+
+Completed agents and their results:
+{completed_results}
+
+Currently running agents:
+{running_agents}
+
+Available displays (idle, can assign new subtasks): {idle_displays}
+
+Decide what to do. You can:
+
+1. ASSIGN a new subtask to an idle display:
+ASSIGN <agent_id>: <task description>
+SETUP: <JSON setup action or "none">
+
+2. MESSAGE a running agent (redirect, provide data, change scope):
+MESSAGE <agent_id>: <your instruction>
+
+3. WAIT if agents are still working and no action needed:
+WAIT
+
+4. DONE if the overall task is complete:
+DONE
+
+You can output multiple ASSIGN/MESSAGE lines. Be decisive."""
 
 
 def plan_subtasks(
@@ -395,41 +429,18 @@ def _save_action(output_dir: str, step: int, tool_input: Dict[str, Any]):
 # Orchestrator
 # ------------------------------------------------------------------
 
-_MONITOR_PROMPT = """\
-You are the orchestrator monitoring multiple computer-use agents working on \
-subtasks of a larger task.
-
-Overall task: {root_task}
-
-Current agent status:
-{agent_status}
-
-Recently completed agents and their results:
-{completed_results}
-
-Your job: decide if any running agent needs a coordination message.
-
-Reasons to send a message:
-- Another agent completed and its results are relevant (forward the data)
-- An agent is stuck or going off-track based on its latest response
-- An agent's scope should change because of what another agent found
-
-For each agent that needs a message, output:
-MESSAGE <agent_id>: <your message to that agent>
-
-If no messages are needed, output:
-NO_ACTION
-
-Be concise. Only send messages when they add real value."""
-
-
 class Orchestrator:
-    """Assigns subtasks to subagents on separate displays and monitors progress.
+    """Central hub that assigns subtasks, collects results, and coordinates.
 
-    The orchestrator actively monitors agents:
-    - Periodically checks progress via LLM
-    - Forwards completed agent results to running agents that need them
-    - Sends coordination messages when agents are stuck or need redirection
+    Flow:
+      1. Launch initial subtasks on displays (from planner)
+      2. Run orchestrator loop: every few seconds, check for completed agents
+      3. When an agent completes: collect result, consult LLM for next action
+         - ASSIGN: give a new subtask to an idle display
+         - MESSAGE: send instructions to a running agent
+         - WAIT: do nothing, agents are still working
+         - DONE: overall task is complete, stop everything
+      4. When all agents idle and orchestrator says DONE, return results
     """
 
     def __init__(
@@ -446,7 +457,6 @@ class Orchestrator:
         password: str = "osworld-public-evaluation",
         root_task: str = "",
     ):
-        self.subtasks = {st.id: st for st in subtasks}
         self.display_pool = display_pool
         self.vm_exec = vm_exec
         self.bedrock_factory = bedrock_factory
@@ -459,72 +469,91 @@ class Orchestrator:
         self.root_task = root_task
 
         self._lock = threading.RLock()
+        self._all_subtasks: Dict[str, Subtask] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._bedrock_clients: Dict[str, Any] = {}
         self._messages: Dict[str, List[str]] = {}
         self._start_time: Optional[float] = None
-        self._forwarded_results: set = set()
+        self._agent_counter = 0
+        self._newly_completed: List[str] = []
+
+        for st in subtasks:
+            self._all_subtasks[st.id] = st
 
     def run(self) -> Dict[str, Any]:
-        """Start all subagents and wait for completion."""
+        """Main loop: launch initial subtasks, then monitor and react."""
         self._start_time = time.time()
-        logger.info("Orchestrator starting: %d subtask(s)", len(self.subtasks))
 
-        for subtask in self.subtasks.values():
-            display_num = self.display_pool.allocate(agent_id=subtask.id)
-            if display_num is None:
-                logger.error("No display available for %s", subtask.id)
-                subtask.status = "failed"
-                subtask.result = {"status": "FAIL", "summary": "No display available"}
-                continue
-
-            subtask.display_num = display_num
-            thread = threading.Thread(
-                target=self._run_agent,
-                args=(subtask,),
-                daemon=True,
-                name=f"agent-{subtask.id}",
-            )
-            self._threads[subtask.id] = thread
-            thread.start()
-            logger.info("Started %s on display :%d", subtask.id, display_num)
-
-        monitor_bedrock = self.bedrock_factory(
-            os.path.join(self.output_dir, "_monitor"), "monitor"
+        orch_bedrock = self.bedrock_factory(
+            os.path.join(self.output_dir, "_orchestrator"), "orchestrator"
         )
         with self._lock:
-            self._bedrock_clients["monitor"] = monitor_bedrock
+            self._bedrock_clients["orchestrator"] = orch_bedrock
 
-        monitor = threading.Thread(
-            target=self._monitor, args=(monitor_bedrock,), daemon=True, name="monitor"
+        for subtask in list(self._all_subtasks.values()):
+            self._launch_agent(subtask)
+
+        logger.info(
+            "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
         )
-        monitor.start()
 
-        deadline = self._start_time + self.task_timeout
-        while time.time() < deadline:
-            all_done = True
-            for thread in list(self._threads.values()):
-                if thread.is_alive():
-                    remaining = max(0.1, deadline - time.time())
-                    thread.join(timeout=min(2.0, remaining))
-                    if thread.is_alive():
-                        all_done = False
-            if all_done:
+        while (time.time() - self._start_time) < self.task_timeout:
+            time.sleep(5)
+
+            with self._lock:
+                running = [
+                    st for st in self._all_subtasks.values()
+                    if st.status == "running"
+                ]
+                completed = [
+                    st for st in self._all_subtasks.values()
+                    if st.status in ("done", "failed")
+                ]
+                newly = list(self._newly_completed)
+                self._newly_completed.clear()
+
+            if not running and not newly:
+                logger.info("All agents finished, no new completions to process")
                 break
+
+            for st in running:
+                logger.info(
+                    "[orchestrator] %s: step %d, display :%s",
+                    st.id, st.step_count, st.display_num,
+                )
+
+            if newly:
+                for agent_id in newly:
+                    st = self._all_subtasks[agent_id]
+                    logger.info(
+                        "[orchestrator] %s completed (%s, %d steps)",
+                        st.id, st.status, st.step_count,
+                    )
+
+                action = self._decide_next(orch_bedrock, running, completed)
+                if action == "DONE":
+                    logger.info("[orchestrator] LLM says overall task is DONE")
+                    break
+
+        # Wait for any still-running threads to finish (short grace period)
+        for thread in list(self._threads.values()):
+            thread.join(timeout=5.0)
 
         duration = time.time() - self._start_time
 
-        for subtask in self.subtasks.values():
-            t = self._threads.get(subtask.id)
+        for st in self._all_subtasks.values():
+            t = self._threads.get(st.id)
             if t and t.is_alive():
-                logger.warning("%s still running after timeout", subtask.id)
-                subtask.status = "failed"
+                logger.warning("%s still running after timeout", st.id)
+                st.status = "failed"
 
-        all_done = all(st.status == "done" for st in self.subtasks.values())
+        all_done = all(
+            st.status == "done" for st in self._all_subtasks.values()
+        )
         status = "DONE" if all_done else "FAIL"
 
         agent_summaries = {}
-        for st in self.subtasks.values():
+        for st in self._all_subtasks.values():
             summary = st.result.get("summary", "")[:300] if st.result else ""
             agent_summaries[st.id] = {
                 "status": st.status,
@@ -535,7 +564,7 @@ class Orchestrator:
 
         logger.info(
             "Orchestrator finished: %s (%.1fs, %d agents)",
-            status, duration, len(self.subtasks),
+            status, duration, len(self._all_subtasks),
         )
 
         return {
@@ -544,8 +573,28 @@ class Orchestrator:
             "agents": agent_summaries,
         }
 
+    def _launch_agent(self, subtask: Subtask):
+        """Allocate a display and start an agent thread for a subtask."""
+        display_num = self.display_pool.allocate(agent_id=subtask.id)
+        if display_num is None:
+            logger.error("No display available for %s", subtask.id)
+            subtask.status = "failed"
+            subtask.result = {"status": "FAIL", "summary": "No display available"}
+            return
+
+        subtask.display_num = display_num
+        thread = threading.Thread(
+            target=self._run_agent,
+            args=(subtask,),
+            daemon=True,
+            name=f"agent-{subtask.id}",
+        )
+        self._threads[subtask.id] = thread
+        thread.start()
+        logger.info("Launched %s on display :%d", subtask.id, display_num)
+
     def _run_agent(self, subtask: Subtask):
-        """Run setup + worker for one subtask."""
+        """Run setup + worker for one subtask. Notifies orchestrator on completion."""
         tag = f"[{subtask.id}]"
         try:
             subtask.status = "running"
@@ -587,92 +636,36 @@ class Orchestrator:
         finally:
             if subtask.display_num is not None:
                 self.display_pool.release(subtask.display_num)
-
-    def _monitor(self, bedrock: Any):
-        """Actively monitor agents: forward results, send coordination messages."""
-        last_check_steps: Dict[str, int] = {}
-
-        while True:
-            time.sleep(10)
             with self._lock:
-                active = [st for st in self.subtasks.values() if st.status == "running"]
-                completed = [st for st in self.subtasks.values()
-                             if st.status in ("done", "failed") and st.result]
-            if not active:
-                break
+                self._newly_completed.append(subtask.id)
 
-            for st in active:
-                logger.info(
-                    "[monitor] %s: step %d, display :%s",
-                    st.id, st.step_count, st.display_num,
-                )
-
-            self._forward_completed_results(active, completed)
-
-            has_new_activity = any(
-                st.step_count > last_check_steps.get(st.id, 0) for st in active
-            )
-            has_new_completions = any(
-                st.id not in self._forwarded_results for st in completed
-            )
-            if not has_new_activity and not has_new_completions:
-                continue
-
-            for st in active:
-                last_check_steps[st.id] = st.step_count
-
-            self._llm_evaluate(bedrock, active, completed)
-
-    def _forward_completed_results(
-        self, active: List[Subtask], completed: List[Subtask]
-    ):
-        """When an agent completes, forward its results to all running agents."""
-        for done_st in completed:
-            if done_st.id in self._forwarded_results:
-                continue
-            self._forwarded_results.add(done_st.id)
-
-            summary = done_st.result.get("summary", "")[:2000] if done_st.result else ""
-            if not summary:
-                continue
-
-            msg = (
-                f"Agent '{done_st.id}' has completed its subtask. "
-                f"Here are its results:\n{summary}\n\n"
-                "Use this data if relevant to your work. Do not redo work it already did."
-            )
-            for running_st in active:
-                self.send_message(running_st.id, msg)
-                logger.info(
-                    "[monitor] Forwarded %s results to %s", done_st.id, running_st.id
-                )
-
-    def _llm_evaluate(
-        self, bedrock: Any, active: List[Subtask], completed: List[Subtask]
-    ):
-        """Use LLM to evaluate progress and send coordination messages."""
-        agent_lines = []
-        for st in active:
-            latest = st.latest_response[:300] if st.latest_response else "(no response yet)"
-            agent_lines.append(
-                f"  [{st.id}] display:{st.display_num} step:{st.step_count} "
-                f"task: {st.task[:100]}\n    latest: {latest}"
-            )
-        for st in completed:
-            summary = st.result.get("summary", "")[:200] if st.result else ""
-            agent_lines.append(
-                f"  [{st.id}] COMPLETED ({st.step_count} steps): {summary}"
-            )
-
+    def _decide_next(
+        self,
+        bedrock: Any,
+        running: List[Subtask],
+        completed: List[Subtask],
+    ) -> str:
+        """Ask LLM what to do after an agent completed. Returns action taken."""
         completed_lines = []
         for st in completed:
             summary = st.result.get("summary", "")[:500] if st.result else "(no result)"
-            completed_lines.append(f"  [{st.id}]: {summary}")
+            completed_lines.append(f"  [{st.id}] ({st.status}, {st.step_count} steps): {summary}")
 
-        prompt = _MONITOR_PROMPT.format(
+        running_lines = []
+        for st in running:
+            latest = st.latest_response[:200] if st.latest_response else "(no response yet)"
+            running_lines.append(
+                f"  [{st.id}] display:{st.display_num} step:{st.step_count} "
+                f"task: {st.task[:100]}\n    latest: {latest}"
+            )
+
+        idle_displays = self.display_pool.get_idle_count()
+
+        prompt = _ORCHESTRATOR_PROMPT.format(
             root_task=self.root_task[:500],
-            agent_status="\n".join(agent_lines) if agent_lines else "(none)",
             completed_results="\n".join(completed_lines) if completed_lines else "(none)",
+            running_agents="\n".join(running_lines) if running_lines else "(none idle)",
+            idle_displays=idle_displays,
         )
 
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -680,34 +673,78 @@ class Orchestrator:
         try:
             content_blocks, _ = bedrock.chat(
                 messages=messages,
-                system="You are a task orchestrator. Be concise.",
+                system="You are a task orchestrator. Be concise and decisive.",
                 model=self.model,
                 temperature=0.3,
-                max_tokens=500,
+                max_tokens=800,
             )
         except Exception as e:
-            logger.warning("[monitor] LLM evaluation failed: %s", e)
-            return
+            logger.warning("[orchestrator] LLM decision failed: %s", e)
+            return "WAIT"
 
         response = "".join(
             b.get("text", "") for b in content_blocks
             if isinstance(b, dict) and b.get("type") == "text"
         )
+        logger.info("[orchestrator] Decision: %s", response[:300])
+
+        result_action = "WAIT"
 
         for line in response.strip().split("\n"):
             line = line.strip()
-            if line.startswith("MESSAGE "):
+
+            if line.startswith("ASSIGN "):
+                rest = line[len("ASSIGN "):]
+                if ":" in rest:
+                    agent_id, task_desc = rest.split(":", 1)
+                    agent_id = agent_id.strip()
+                    task_desc = task_desc.strip()
+                    if task_desc:
+                        self._assign_new_subtask(agent_id, task_desc, response)
+
+            elif line.startswith("MESSAGE "):
                 rest = line[len("MESSAGE "):]
                 if ":" in rest:
                     agent_id, msg = rest.split(":", 1)
                     agent_id = agent_id.strip()
                     msg = msg.strip()
-                    if agent_id in self.subtasks and self.subtasks[agent_id].status == "running":
+                    if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
                         self.send_message(agent_id, msg)
-                        logger.info("[monitor] LLM -> %s: %s", agent_id, msg[:120])
+                        logger.info("[orchestrator] -> %s: %s", agent_id, msg[:120])
+
+            elif line.strip() == "DONE":
+                result_action = "DONE"
+
+        return result_action
+
+    def _assign_new_subtask(self, agent_id: str, task_desc: str, full_response: str):
+        """Create and launch a new subtask on an idle display."""
+        setup: List[Dict[str, Any]] = []
+        for line in full_response.split("\n"):
+            line = line.strip()
+            if line.startswith("SETUP:"):
+                setup_str = line[len("SETUP:"):].strip()
+                if setup_str.lower() != "none":
+                    try:
+                        parsed = json.loads(setup_str)
+                        setup = [parsed] if isinstance(parsed, dict) else parsed
+                    except json.JSONDecodeError:
+                        pass
+                break
+
+        if agent_id in self._all_subtasks:
+            self._agent_counter += 1
+            agent_id = f"{agent_id}_{self._agent_counter}"
+
+        subtask = Subtask(id=agent_id, task=task_desc, setup=setup)
+        with self._lock:
+            self._all_subtasks[agent_id] = subtask
+
+        self._launch_agent(subtask)
+        logger.info("[orchestrator] Assigned new subtask: %s — %s", agent_id, task_desc[:80])
 
     def send_message(self, agent_id: str, message: str):
-        """Send a coordination message to a subagent."""
+        """Send a coordination message to a running subagent."""
         with self._lock:
             self._messages.setdefault(agent_id, []).append(message)
         logger.info("Message -> %s: %s", agent_id, message[:120])
