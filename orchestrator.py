@@ -102,22 +102,24 @@ Currently running agents:
 
 Available displays (idle, can assign new subtasks): {idle_displays}
 
-Decide what to do. You can:
+Decide what to do. You can take MULTIPLE actions:
 
-1. ASSIGN a new subtask to an idle display:
-ASSIGN <agent_id>: <task description>
+1. PEEK <agent_id> — take a screenshot of a running agent's display to see \
+what it's doing right now. Use when an agent has been running many steps, \
+seems stuck, or you need to verify its progress before deciding.
+
+2. ASSIGN <agent_id>: <task description> — give a new subtask to an idle display.
 SETUP: <JSON setup action or "none">
 
-2. MESSAGE a running agent (redirect, provide data, change scope):
-MESSAGE <agent_id>: <your instruction>
+3. MESSAGE <agent_id>: <your instruction> — redirect a running agent, provide \
+data from another agent's results, or change its scope.
 
-3. WAIT if agents are still working and no action needed:
-WAIT
+4. WAIT — agents are still working and no action needed.
 
-4. DONE if the overall task is complete:
-DONE
+5. DONE — the overall task is complete.
 
-You can output multiple ASSIGN/MESSAGE lines. Be decisive."""
+You can output multiple actions (e.g. PEEK one agent, MESSAGE another). \
+Be decisive."""
 
 
 def plan_subtasks(
@@ -497,6 +499,10 @@ class Orchestrator:
             "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
         )
 
+        last_check_steps: Dict[str, int] = {}
+        check_interval = 30
+        last_periodic_check = time.time()
+
         while (time.time() - self._start_time) < self.task_timeout:
             time.sleep(5)
 
@@ -522,6 +528,8 @@ class Orchestrator:
                     st.id, st.step_count, st.display_num,
                 )
 
+            should_decide = False
+
             if newly:
                 for agent_id in newly:
                     st = self._all_subtasks[agent_id]
@@ -529,7 +537,20 @@ class Orchestrator:
                         "[orchestrator] %s completed (%s, %d steps)",
                         st.id, st.status, st.step_count,
                     )
+                should_decide = True
 
+            if running and (time.time() - last_periodic_check) >= check_interval:
+                has_progress = any(
+                    st.step_count > last_check_steps.get(st.id, 0)
+                    for st in running
+                )
+                if has_progress:
+                    should_decide = True
+                    for st in running:
+                        last_check_steps[st.id] = st.step_count
+
+            if should_decide:
+                last_periodic_check = time.time()
                 action = self._decide_next(orch_bedrock, running, completed)
                 if action == "DONE":
                     logger.info("[orchestrator] LLM says overall task is DONE")
@@ -689,11 +710,17 @@ class Orchestrator:
         logger.info("[orchestrator] Decision: %s", response[:300])
 
         result_action = "WAIT"
+        peek_ids: List[str] = []
 
         for line in response.strip().split("\n"):
             line = line.strip()
 
-            if line.startswith("ASSIGN "):
+            if line.startswith("PEEK "):
+                agent_id = line[len("PEEK "):].strip()
+                if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
+                    peek_ids.append(agent_id)
+
+            elif line.startswith("ASSIGN "):
                 rest = line[len("ASSIGN "):]
                 if ":" in rest:
                     agent_id, task_desc = rest.split(":", 1)
@@ -711,6 +738,105 @@ class Orchestrator:
                     if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
                         self.send_message(agent_id, msg)
                         logger.info("[orchestrator] -> %s: %s", agent_id, msg[:120])
+
+            elif line.strip() == "DONE":
+                result_action = "DONE"
+
+        if peek_ids and result_action != "DONE":
+            followup = self._handle_peeks(bedrock, peek_ids, running, completed)
+            if followup == "DONE":
+                result_action = "DONE"
+
+        return result_action
+
+    def _handle_peeks(
+        self,
+        bedrock: Any,
+        peek_ids: List[str],
+        running: List[Subtask],
+        completed: List[Subtask],
+    ) -> str:
+        """Take screenshots of peeked agents and ask LLM for follow-up actions."""
+        peek_content: List[Dict[str, Any]] = [
+            {"type": "text", "text": (
+                f"You peeked at {len(peek_ids)} agent(s). "
+                "Here are their current screenshots. "
+                "Decide: MESSAGE, ASSIGN, WAIT, or DONE."
+            )}
+        ]
+
+        for agent_id in peek_ids:
+            st = self._all_subtasks[agent_id]
+            if st.display_num is None:
+                continue
+
+            display = XvfbDisplay(self.vm_ip, self.server_port, st.display_num)
+            shot = display.screenshot()
+
+            peek_content.append({
+                "type": "text",
+                "text": f"\n[{agent_id}] display:{st.display_num} step:{st.step_count} task: {st.task[:150]}",
+            })
+
+            if shot:
+                resized = _resize_screenshot(shot)
+                peek_content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64.b64encode(resized).decode(),
+                    },
+                })
+                logger.info("[orchestrator] PEEK %s — screenshot captured", agent_id)
+            else:
+                peek_content.append({
+                    "type": "text", "text": "(screenshot failed)"
+                })
+                logger.warning("[orchestrator] PEEK %s — screenshot failed", agent_id)
+
+        messages = [{"role": "user", "content": peek_content}]
+
+        try:
+            content_blocks, _ = bedrock.chat(
+                messages=messages,
+                system="You are a task orchestrator. You just peeked at agent screenshots. Be concise and decisive.",
+                model=self.model,
+                temperature=0.3,
+                max_tokens=800,
+            )
+        except Exception as e:
+            logger.warning("[orchestrator] PEEK follow-up LLM failed: %s", e)
+            return "WAIT"
+
+        response = "".join(
+            b.get("text", "") for b in content_blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        logger.info("[orchestrator] PEEK decision: %s", response[:300])
+
+        result_action = "WAIT"
+        for line in response.strip().split("\n"):
+            line = line.strip()
+
+            if line.startswith("MESSAGE "):
+                rest = line[len("MESSAGE "):]
+                if ":" in rest:
+                    agent_id, msg = rest.split(":", 1)
+                    agent_id = agent_id.strip()
+                    msg = msg.strip()
+                    if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
+                        self.send_message(agent_id, msg)
+                        logger.info("[orchestrator] PEEK -> %s: %s", agent_id, msg[:120])
+
+            elif line.startswith("ASSIGN "):
+                rest = line[len("ASSIGN "):]
+                if ":" in rest:
+                    agent_id, task_desc = rest.split(":", 1)
+                    agent_id = agent_id.strip()
+                    task_desc = task_desc.strip()
+                    if task_desc:
+                        self._assign_new_subtask(agent_id, task_desc, response)
 
             elif line.strip() == "DONE":
                 result_action = "DONE"
