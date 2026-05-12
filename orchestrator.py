@@ -48,6 +48,7 @@ class Subtask:
     result: Optional[Dict[str, Any]] = None
     step_count: int = 0
     latest_response: str = ""
+    step_history: List[str] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------
@@ -263,7 +264,13 @@ def _run_worker(
 
         if shot:
             _save_screenshot(task_output, step, shot, step_timestamp)
-            obs_content = _build_screenshot_observation(step, shot)
+            try:
+                obs_content = _build_screenshot_observation(step, shot)
+            except Exception as e:
+                logger.warning("%s Corrupt screenshot at step %d: %s", tag, step, e)
+                obs_content = [
+                    {"type": "text", "text": f"Step {step}: screenshot corrupted, retrying next step."}
+                ]
         else:
             logger.warning("%s Screenshot failed at step %d", tag, step)
             obs_content: List[Dict[str, Any]] = [
@@ -316,6 +323,9 @@ def _run_worker(
         with open(os.path.join(task_output, f"step_{step:03d}_response.txt"), "w") as f:
             f.write(response_text)
 
+        step_entry = f"[step {step}] {response_text.strip()}"
+        step_action = ""
+
         for block in content_blocks:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
@@ -334,6 +344,7 @@ def _run_worker(
                     display.run_action(action_code)
                     time.sleep(1)
                     _save_action(task_output, step, tool_input)
+                    step_action = _action_summary(tool_input)
 
                 pending_tool_results.append({
                     "type": "tool_result",
@@ -346,6 +357,10 @@ def _run_worker(
                     "tool_use_id": tool_id,
                     "content": f"Unknown tool: {tool_name}. You only have the 'computer' tool.",
                 })
+
+        if step_action:
+            step_entry += f" → {step_action}"
+        subtask.step_history.append(step_entry)
 
         for line in final_response_text.strip().split("\n"):
             line = line.strip()
@@ -752,51 +767,33 @@ class Orchestrator:
         running: List[Subtask],
         completed: List[Subtask],
     ) -> str:
-        """Take screenshots of peeked agents and ask LLM for follow-up actions."""
-        peek_content: List[Dict[str, Any]] = [
-            {"type": "text", "text": (
-                f"You peeked at {len(peek_ids)} agent(s). "
-                "Here are their current screenshots. "
-                "Decide: MESSAGE, ASSIGN, WAIT, or DONE."
-            )}
+        """Show peeked agents' full conversation history and ask LLM for follow-up."""
+        parts = [
+            f"You peeked at {len(peek_ids)} agent(s). "
+            "Here is each agent's full conversation history (what it said and did at each step). "
+            "Decide: MESSAGE, ASSIGN, WAIT, or DONE.\n"
         ]
 
         for agent_id in peek_ids:
             st = self._all_subtasks[agent_id]
-            if st.display_num is None:
-                continue
-
-            display = XvfbDisplay(self.vm_ip, self.server_port, st.display_num)
-            shot = display.screenshot()
-
-            peek_content.append({
-                "type": "text",
-                "text": f"\n[{agent_id}] display:{st.display_num} step:{st.step_count} task: {st.task[:150]}",
-            })
-
-            if shot:
-                resized = _resize_screenshot(shot)
-                peek_content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": base64.b64encode(resized).decode(),
-                    },
-                })
-                logger.info("[orchestrator] PEEK %s — screenshot captured", agent_id)
+            parts.append(f"\n--- [{agent_id}] display:{st.display_num} step:{st.step_count} ---")
+            parts.append(f"Task: {st.task[:300]}")
+            if st.step_history:
+                parts.append("History:")
+                for entry in st.step_history:
+                    parts.append(f"  {entry}")
             else:
-                peek_content.append({
-                    "type": "text", "text": "(screenshot failed)"
-                })
-                logger.warning("[orchestrator] PEEK %s — screenshot failed", agent_id)
+                parts.append("History: (no steps yet)")
+            logger.info("[orchestrator] PEEK %s — %d steps in history", agent_id, len(st.step_history))
 
-        messages = [{"role": "user", "content": peek_content}]
+        prompt = "\n".join(parts)
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
 
         try:
             content_blocks, _ = bedrock.chat(
                 messages=messages,
-                system="You are a task orchestrator. You just peeked at agent screenshots. Be concise and decisive.",
+                system="You are a task orchestrator reviewing agent progress. Be concise and decisive.",
                 model=self.model,
                 temperature=0.3,
                 max_tokens=800,
