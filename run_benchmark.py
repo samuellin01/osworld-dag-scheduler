@@ -1,4 +1,4 @@
-"""Run DAG-scheduled parallel agent on OSWorld benchmark tasks.
+"""Run parallel multi-agent on OSWorld benchmark tasks.
 
 Usage:
     python run_benchmark.py --task-id 0 --provider-name aws --region us-east-1 --headless
@@ -15,9 +15,8 @@ from typing import Any, Dict, Optional
 import requests
 
 from bedrock_client import BedrockClient
-from dag_core import Orchestrator
-from dag_planner import convert_plan_to_dag, plan_dag
 from display_pool import DisplayPool
+from orchestrator import Orchestrator, plan_subtasks
 from google_workspace_oauth import (
     create_sheet_from_template_oauth,
     create_doc_from_template_oauth,
@@ -453,7 +452,7 @@ def load_collaborative_tasks():
 
 
 def run_single_task(task_data, args, output_base):
-    """Run a single benchmark task using DAG scheduler."""
+    """Run a single benchmark task using the parallel orchestrator."""
     task_data = _process_google_workspace_config(task_data)
 
     task_id = task_data.get("id", "unknown")
@@ -527,22 +526,22 @@ def run_single_task(task_data, args, output_base):
         region=args.region, log_dir=output_dir, agent_id="planner"
     )
 
-    logger.info("Planning DAG for task...")
-    dag_plan = plan_dag(
+    logger.info("Planning subtasks...")
+    subtasks = plan_subtasks(
         task_description=instruction,
         bedrock=planner_bedrock,
         model=args.model,
     )
 
-    dag = convert_plan_to_dag(plan=dag_plan, root_task=instruction)
-
-    with open(os.path.join(output_dir, "dag_plan.json"), "w") as f:
+    with open(os.path.join(output_dir, "plan.json"), "w") as f:
         plan_data = {
             "task_id": task_id,
             "instruction": instruction,
-            "plan": dag_plan,
-            "num_agents": len(dag.agents),
-            "num_agents": len(dag.agents),
+            "subtasks": [
+                {"id": st.id, "task": st.task, "setup": st.setup}
+                for st in subtasks
+            ],
+            "num_agents": len(subtasks),
         }
         json.dump(plan_data, f, indent=2)
 
@@ -550,7 +549,7 @@ def run_single_task(task_data, args, output_base):
         return BedrockClient(region=args.region, log_dir=log_dir, agent_id=agent_id)
 
     orchestrator = Orchestrator(
-        plan=dag,
+        subtasks=subtasks,
         display_pool=display_pool,
         vm_exec=vm_exec,
         bedrock_factory=bedrock_factory,
