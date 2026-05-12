@@ -395,8 +395,42 @@ def _save_action(output_dir: str, step: int, tool_input: Dict[str, Any]):
 # Orchestrator
 # ------------------------------------------------------------------
 
+_MONITOR_PROMPT = """\
+You are the orchestrator monitoring multiple computer-use agents working on \
+subtasks of a larger task.
+
+Overall task: {root_task}
+
+Current agent status:
+{agent_status}
+
+Recently completed agents and their results:
+{completed_results}
+
+Your job: decide if any running agent needs a coordination message.
+
+Reasons to send a message:
+- Another agent completed and its results are relevant (forward the data)
+- An agent is stuck or going off-track based on its latest response
+- An agent's scope should change because of what another agent found
+
+For each agent that needs a message, output:
+MESSAGE <agent_id>: <your message to that agent>
+
+If no messages are needed, output:
+NO_ACTION
+
+Be concise. Only send messages when they add real value."""
+
+
 class Orchestrator:
-    """Assigns subtasks to subagents on separate displays and monitors progress."""
+    """Assigns subtasks to subagents on separate displays and monitors progress.
+
+    The orchestrator actively monitors agents:
+    - Periodically checks progress via LLM
+    - Forwards completed agent results to running agents that need them
+    - Sends coordination messages when agents are stuck or need redirection
+    """
 
     def __init__(
         self,
@@ -410,6 +444,7 @@ class Orchestrator:
         output_dir: str,
         task_timeout: float = 1200.0,
         password: str = "osworld-public-evaluation",
+        root_task: str = "",
     ):
         self.subtasks = {st.id: st for st in subtasks}
         self.display_pool = display_pool
@@ -421,12 +456,14 @@ class Orchestrator:
         self.output_dir = output_dir
         self.task_timeout = task_timeout
         self.password = password
+        self.root_task = root_task
 
         self._lock = threading.RLock()
         self._threads: Dict[str, threading.Thread] = {}
         self._bedrock_clients: Dict[str, Any] = {}
         self._messages: Dict[str, List[str]] = {}
         self._start_time: Optional[float] = None
+        self._forwarded_results: set = set()
 
     def run(self) -> Dict[str, Any]:
         """Start all subagents and wait for completion."""
@@ -452,7 +489,15 @@ class Orchestrator:
             thread.start()
             logger.info("Started %s on display :%d", subtask.id, display_num)
 
-        monitor = threading.Thread(target=self._monitor, daemon=True, name="monitor")
+        monitor_bedrock = self.bedrock_factory(
+            os.path.join(self.output_dir, "_monitor"), "monitor"
+        )
+        with self._lock:
+            self._bedrock_clients["monitor"] = monitor_bedrock
+
+        monitor = threading.Thread(
+            target=self._monitor, args=(monitor_bedrock,), daemon=True, name="monitor"
+        )
         monitor.start()
 
         deadline = self._start_time + self.task_timeout
@@ -543,18 +588,123 @@ class Orchestrator:
             if subtask.display_num is not None:
                 self.display_pool.release(subtask.display_num)
 
-    def _monitor(self):
-        """Periodically log progress of all subagents."""
+    def _monitor(self, bedrock: Any):
+        """Actively monitor agents: forward results, send coordination messages."""
+        last_check_steps: Dict[str, int] = {}
+
         while True:
-            time.sleep(15)
+            time.sleep(10)
             with self._lock:
                 active = [st for st in self.subtasks.values() if st.status == "running"]
+                completed = [st for st in self.subtasks.values()
+                             if st.status in ("done", "failed") and st.result]
             if not active:
                 break
+
             for st in active:
                 logger.info(
-                    "[monitor] %s: step %d, status=%s", st.id, st.step_count, st.status
+                    "[monitor] %s: step %d, display :%s",
+                    st.id, st.step_count, st.display_num,
                 )
+
+            self._forward_completed_results(active, completed)
+
+            has_new_activity = any(
+                st.step_count > last_check_steps.get(st.id, 0) for st in active
+            )
+            has_new_completions = any(
+                st.id not in self._forwarded_results for st in completed
+            )
+            if not has_new_activity and not has_new_completions:
+                continue
+
+            for st in active:
+                last_check_steps[st.id] = st.step_count
+
+            self._llm_evaluate(bedrock, active, completed)
+
+    def _forward_completed_results(
+        self, active: List[Subtask], completed: List[Subtask]
+    ):
+        """When an agent completes, forward its results to all running agents."""
+        for done_st in completed:
+            if done_st.id in self._forwarded_results:
+                continue
+            self._forwarded_results.add(done_st.id)
+
+            summary = done_st.result.get("summary", "")[:2000] if done_st.result else ""
+            if not summary:
+                continue
+
+            msg = (
+                f"Agent '{done_st.id}' has completed its subtask. "
+                f"Here are its results:\n{summary}\n\n"
+                "Use this data if relevant to your work. Do not redo work it already did."
+            )
+            for running_st in active:
+                self.send_message(running_st.id, msg)
+                logger.info(
+                    "[monitor] Forwarded %s results to %s", done_st.id, running_st.id
+                )
+
+    def _llm_evaluate(
+        self, bedrock: Any, active: List[Subtask], completed: List[Subtask]
+    ):
+        """Use LLM to evaluate progress and send coordination messages."""
+        agent_lines = []
+        for st in active:
+            latest = st.latest_response[:300] if st.latest_response else "(no response yet)"
+            agent_lines.append(
+                f"  [{st.id}] display:{st.display_num} step:{st.step_count} "
+                f"task: {st.task[:100]}\n    latest: {latest}"
+            )
+        for st in completed:
+            summary = st.result.get("summary", "")[:200] if st.result else ""
+            agent_lines.append(
+                f"  [{st.id}] COMPLETED ({st.step_count} steps): {summary}"
+            )
+
+        completed_lines = []
+        for st in completed:
+            summary = st.result.get("summary", "")[:500] if st.result else "(no result)"
+            completed_lines.append(f"  [{st.id}]: {summary}")
+
+        prompt = _MONITOR_PROMPT.format(
+            root_task=self.root_task[:500],
+            agent_status="\n".join(agent_lines) if agent_lines else "(none)",
+            completed_results="\n".join(completed_lines) if completed_lines else "(none)",
+        )
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+
+        try:
+            content_blocks, _ = bedrock.chat(
+                messages=messages,
+                system="You are a task orchestrator. Be concise.",
+                model=self.model,
+                temperature=0.3,
+                max_tokens=500,
+            )
+        except Exception as e:
+            logger.warning("[monitor] LLM evaluation failed: %s", e)
+            return
+
+        response = "".join(
+            b.get("text", "") for b in content_blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("MESSAGE "):
+                rest = line[len("MESSAGE "):]
+                if ":" in rest:
+                    agent_id, msg = rest.split(":", 1)
+                    agent_id = agent_id.strip()
+                    msg = msg.strip()
+                    if agent_id in self.subtasks and self.subtasks[agent_id].status == "running":
+                        self.send_message(agent_id, msg)
+                        logger.info("[monitor] LLM -> %s: %s", agent_id, msg[:120])
 
     def send_message(self, agent_id: str, message: str):
         """Send a coordination message to a subagent."""
