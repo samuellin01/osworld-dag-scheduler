@@ -499,12 +499,11 @@ class Orchestrator:
             "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
         )
 
-        last_check_steps: Dict[str, int] = {}
-        check_interval = 30
-        last_periodic_check = time.time()
+        check_interval = 15
+        last_check_time = 0.0
 
         while (time.time() - self._start_time) < self.task_timeout:
-            time.sleep(5)
+            time.sleep(3)
 
             with self._lock:
                 running = [
@@ -519,16 +518,10 @@ class Orchestrator:
                 self._newly_completed.clear()
 
             if not running and not newly:
-                logger.info("All agents finished, no new completions to process")
+                logger.info("[orchestrator] All agents finished")
                 break
 
-            for st in running:
-                logger.info(
-                    "[orchestrator] %s: step %d, display :%s",
-                    st.id, st.step_count, st.display_num,
-                )
-
-            should_decide = False
+            trigger = None
 
             if newly:
                 for agent_id in newly:
@@ -537,23 +530,26 @@ class Orchestrator:
                         "[orchestrator] %s completed (%s, %d steps)",
                         st.id, st.status, st.step_count,
                     )
-                should_decide = True
+                trigger = "completion"
 
-            if running and (time.time() - last_periodic_check) >= check_interval:
-                has_progress = any(
-                    st.step_count > last_check_steps.get(st.id, 0)
-                    for st in running
-                )
-                if has_progress:
-                    should_decide = True
-                    for st in running:
-                        last_check_steps[st.id] = st.step_count
+            elif running and (time.time() - last_check_time) >= check_interval:
+                trigger = "periodic"
 
-            if should_decide:
-                last_periodic_check = time.time()
+            if trigger:
+                last_check_time = time.time()
+                elapsed = time.time() - self._start_time
+
+                for st in running:
+                    logger.info(
+                        "[orchestrator] check (%s, %.0fs) — %s: step %d, display :%s",
+                        trigger, elapsed, st.id, st.step_count, st.display_num,
+                    )
+
                 action = self._decide_next(orch_bedrock, running, completed)
+                logger.info("[orchestrator] action taken: %s", action)
+
                 if action == "DONE":
-                    logger.info("[orchestrator] LLM says overall task is DONE")
+                    logger.info("[orchestrator] Overall task is DONE")
                     break
 
         # Wait for any still-running threads to finish (short grace period)
