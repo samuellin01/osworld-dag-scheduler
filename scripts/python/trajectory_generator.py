@@ -470,18 +470,18 @@ def generate_trajectory_html(
             except (ValueError, OSError):
                 pass
 
-    # Infer orchestrator start time from execution_log.json so the initial
-    # planning phase is visible in the timeline.  execution_log events are
-    # timestamped relative to _start_time.  If the first "launch" event is
-    # at e.g. 18s, the orchestrator spent 18s planning.  We shift
-    # first_timestamp back by that amount so agent steps start at ~18s
-    # instead of 0s.
+    # Parse execution_log.json for orchestrator timing:
+    # 1. Shift first_timestamp so agent steps are relative to orchestrator start
+    # 2. Compute orchestrator "thinking" intervals for timeline bars
     orch_offset = 0.0
+    orch_thinking_intervals: List[Tuple[float, float, str]] = []  # (start, end, label)
     exec_log_path_for_offset = local_path / "_orchestrator" / "execution_log.json"
     if exec_log_path_for_offset.is_file() and first_timestamp is not None:
         try:
             with open(exec_log_path_for_offset, 'r', encoding='utf-8') as f:
                 _exec_events = json.load(f)
+
+            # Find first launch to compute offset
             first_launch_time = None
             for evt in _exec_events:
                 if evt.get('event') in ('launch', 'assign'):
@@ -490,6 +490,26 @@ def generate_trajectory_html(
             if first_launch_time and first_launch_time > 0:
                 orch_offset = first_launch_time
                 first_timestamp = first_timestamp - orch_offset
+
+            # Build orchestrator thinking intervals from event gaps.
+            # The orchestrator is "thinking" between:
+            #   time 0 → first launch (initial planning)
+            #   last completion before a launch → that launch (re-planning)
+            #   last event → done event (final decision)
+            last_idle_start = 0.0
+            for evt in _exec_events:
+                t = evt.get('time', 0)
+                etype = evt.get('event', '')
+                if etype in ('launch', 'assign'):
+                    if t - last_idle_start >= 3:
+                        label = 'planning' if last_idle_start == 0 else 'deciding'
+                        orch_thinking_intervals.append((last_idle_start, t, label))
+                    last_idle_start = t
+                elif etype == 'complete':
+                    last_idle_start = t
+                elif etype == 'done':
+                    if t - last_idle_start >= 3:
+                        orch_thinking_intervals.append((last_idle_start, t, 'finalizing'))
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -578,10 +598,11 @@ def generate_trajectory_html(
             'steps': steps,
         })
 
-    # Recalculate total duration from actual agent end times
-    # This ensures timeline duration matches the last actual step, not API call processing time
+    # Use the larger of result.json duration and agent-derived duration
+    # result.json includes orchestrator's final decision time after last agent step
     if agent_data:
-        total_duration = max(agent['end'] for agent in agent_data)
+        agent_derived = max(agent['end'] for agent in agent_data)
+        total_duration = max(total_duration, agent_derived)
 
     # -- Build action log from step files (not API calls) -------------------
 
@@ -679,8 +700,8 @@ def generate_trajectory_html(
     h.append("<meta charset='utf-8'>")
     h.append(f"<title>Trajectory — {esc(task_id)}</title>")
     # Calculate timeline height based on number of agents
-    has_orch_bar = orch_offset > 0
-    timeline_height = 40 + max(0, (total_agents - 1)) * 24 + (24 if has_orch_bar else 0)
+    has_orch_bars = len(orch_thinking_intervals) > 0
+    timeline_height = 40 + max(0, (total_agents - 1)) * 24 + (24 if has_orch_bars else 0)
 
     h.append("<style>")
     h.append(f"""
@@ -1300,13 +1321,18 @@ h2 {{
     h.append("    </div>")
     h.append("    <div class='timeline-bars' id='timeline-bars'>")
 
-    # Orchestrator planning bar (visible initial thinking time)
+    # Orchestrator thinking bars (derived from execution_log gaps)
     orch_bar_offset = 0
-    if has_orch_bar:
-        orch_pct = (orch_offset / total_duration * 100) if total_duration > 0 else 0
-        h.append(f"    <div class='timeline-bar agent-orchestrator' style='left: 0%; width: {orch_pct:.1f}%; top: 0px' title='Orchestrator planning ({fmt_duration(orch_offset)})'>")
-        h.append(f"      <div class='timeline-bar-label'>orchestrator planning</div>")
-        h.append("    </div>")
+    if has_orch_bars:
+        for iv_start, iv_end, iv_label in orch_thinking_intervals:
+            left_pct = (iv_start / total_duration * 100) if total_duration > 0 else 0
+            width_pct = ((iv_end - iv_start) / total_duration * 100) if total_duration > 0 else 0
+            if width_pct < 0.5:
+                continue
+            iv_dur = fmt_duration(iv_end - iv_start)
+            h.append(f"    <div class='timeline-bar agent-orchestrator' style='left: {left_pct:.1f}%; width: {width_pct:.1f}%; top: 0px' title='Orchestrator {iv_label} ({iv_dur})'>")
+            h.append(f"      <div class='timeline-bar-label'>{iv_label}</div>")
+            h.append("    </div>")
         orch_bar_offset = 24
 
     # Timeline bars for each agent
