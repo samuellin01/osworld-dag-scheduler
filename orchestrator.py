@@ -21,7 +21,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import anthropic
 
@@ -85,6 +85,10 @@ on different displays and edit collaboratively in real-time.
 return a single subtask.
 - Each subtask must be self-contained with all info the agent needs.
 - Each agent should include a detailed summary of its results when it completes.
+- Write task descriptions that are specific and bounded. Tell the agent exactly \
+what to find/do and when to stop. Avoid open-ended instructions like "examine \
+all details" or "document everything". Example: "Read the file, extract the \
+answers, report them" NOT "carefully analyze the complete formatting details".
 
 Output ONLY the JSON object, no other text."""
 
@@ -103,24 +107,87 @@ Currently running agents:
 
 Available displays (idle, can assign new subtasks): {idle_displays}
 
-Decide what to do. You can take MULTIPLE actions:
+Use the provided tools to take actions. You can call multiple tools in one response.
 
-1. PEEK <agent_id> — take a screenshot of a running agent's display to see \
-what it's doing right now. Use when an agent has been running many steps, \
-seems stuck, or you need to verify its progress before deciding.
+IMPORTANT: Let agents work autonomously. Do NOT micromanage or send messages \
+unless an agent is clearly stuck or going completely off-track. Agents scrolling, \
+reading files, or taking multiple steps is NORMAL — do not interrupt them. \
+Only message an agent if it has been stuck doing the same thing for many steps \
+with no progress, or is working on the wrong task entirely."""
 
-2. ASSIGN <agent_id>: <task description> — give a new subtask to an idle display.
-SETUP: <JSON setup action or "none">
 
-3. MESSAGE <agent_id>: <your instruction> — redirect a running agent, provide \
-data from another agent's results, or change its scope.
-
-4. WAIT — agents are still working and no action needed.
-
-5. DONE — the overall task is complete.
-
-You can output multiple actions (e.g. PEEK one agent, MESSAGE another). \
-Be decisive."""
+_ORCHESTRATOR_TOOLS = [
+    {
+        "name": "peek_agent",
+        "description": "View a running agent's full conversation history to check its progress. Use when an agent has been running many steps, seems stuck, or you need to verify progress.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "ID of the running agent to peek at",
+                },
+            },
+            "required": ["agent_id"],
+        },
+    },
+    {
+        "name": "assign_subtask",
+        "description": "Assign a new subtask to an idle display. A new agent will be launched to execute it. Include ALL details the agent needs — be very specific about what to do, what to type, what to click.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Short name for the new agent (e.g. 'write_answers', 'edit_doc')",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Complete task description with all details the agent needs",
+                },
+                "setup": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Setup actions to prepare the display before the agent starts. "
+                        "Empty array for none. Available actions:\n"
+                        '- {"type": "chrome_open_tabs", "parameters": {"urls_to_open": ["https://..."]}}\n'
+                        '- {"type": "launch", "parameters": {"command": ["app", "arg1", ...]}}\n'
+                        '- {"type": "sleep", "parameters": {"seconds": 3}}'
+                    ),
+                    "default": [],
+                },
+            },
+            "required": ["agent_id", "task"],
+        },
+    },
+    {
+        "name": "message_agent",
+        "description": "Send a message to a running agent to redirect it, provide data, or change its scope. The agent receives it as a [MANAGER] message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "ID of the running agent to message",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The instruction or data to send to the agent",
+                },
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
+    {
+        "name": "mark_done",
+        "description": "Declare the overall task complete. Use only when all necessary work is finished and verified.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+]
 
 
 def plan_subtasks(
@@ -187,6 +254,13 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _clean_agent_id(raw: str) -> str:
+    """Extract a clean agent ID from LLM output."""
+    cleaned = raw.strip().strip("[]\"'")
+    cleaned = re.split(r'[\s\[\]]+', cleaned)[0]
+    return cleaned
+
+
 # ------------------------------------------------------------------
 # Worker (CUA agent loop)
 # ------------------------------------------------------------------
@@ -199,7 +273,7 @@ _MAX_STEPS = 200
 def _build_system_prompt(display_num: int, password: str) -> str:
     chrome_port = 1337 + display_num
     return (
-        "You are a computer-use agent on Ubuntu 22.04 with openbox window manager. "
+        "You are a computer-use agent on Ubuntu 22.04 with a desktop environment. "
         f"Password: '{password}'. Home directory: /home/user. "
         "\n\n"
         "Recovery: Press Ctrl+Alt+T to open a terminal.\n\n"
@@ -209,9 +283,13 @@ def _build_system_prompt(display_num: int, password: str) -> str:
         "Your display has been prepared with the necessary applications.\n\n"
         "Your manager may send you messages during execution (shown as [MANAGER]: ...). "
         "Follow their instructions.\n\n"
-        "When you complete your task, include a detailed summary of your results "
-        "and any key data (values, findings, URLs).\n\n"
-        "When done, output SUBTASK COMPLETE followed by a summary.\n"
+        "IMPORTANT: Only output SUBTASK COMPLETE after you have FULLY completed "
+        "your task — not when you have merely observed or opened something. "
+        "If your task says to type, edit, or write something, you must actually "
+        "perform those actions BEFORE declaring complete. Seeing a document is not "
+        "the same as editing it.\n\n"
+        "When done, output SUBTASK COMPLETE followed by a detailed summary of your "
+        "results and any key data (values, findings, URLs).\n"
         "If you cannot complete the task, output SUBTASK FAILED with explanation.\n\n"
         "If setup failed -- empty desktop or wrong app on first screenshot:\n"
         "SUBTASK FAILED: Setup did not work. Display shows [describe what you see].\n\n"
@@ -231,6 +309,7 @@ def _run_worker(
     output_dir: str,
     password: str,
     orchestrator: Orchestrator,
+    prior_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a CUA agent loop for one subtask. Returns result dict."""
     tag = f"[{subtask.id}]"
@@ -238,13 +317,37 @@ def _run_worker(
     display = XvfbDisplay(vm_ip, server_port, display_num)
     system_prompt = _build_system_prompt(display_num, password)
     tools: List[Any] = [COMPUTER_USE_TOOL]
-    resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
+    # Display :0 is 1920x1080 (needs resize), Xvfb displays are 1280x720 (1:1)
+    if display_num == 0:
+        resize_factor = (1920.0 / 1280.0, 1080.0 / 720.0)
+        needs_resize = True
+    else:
+        resize_factor = (1.0, 1.0)
+        needs_resize = False
 
     task_output = os.path.join(output_dir, subtask.id)
     os.makedirs(task_output, exist_ok=True)
 
+    initial_text = f"Your task:\n{subtask.task}"
+
+    if prior_context:
+        initial_text += (
+            f"\n\nDISPLAY CONTEXT: This display was previously used by agent "
+            f"'{prior_context['agent_id']}' which worked on: {prior_context['task']}\n"
+            f"Its result: {prior_context['result']}\n"
+        )
+        if prior_context.get("step_history"):
+            initial_text += "Its step-by-step history:\n"
+            for entry in prior_context["step_history"]:
+                initial_text += f"  {entry}\n"
+        initial_text += (
+            "\nThe display still has the same windows/apps open from that agent's work. "
+            "You can pick up where it left off — do NOT re-open or re-navigate to things "
+            "that are already on screen."
+        )
+
     messages: List[Dict[str, Any]] = [
-        {"role": "user", "content": [{"type": "text", "text": f"Your task:\n{subtask.task}"}]}
+        {"role": "user", "content": [{"type": "text", "text": initial_text}]}
     ]
 
     pending_tool_results: List[Dict[str, Any]] = []
@@ -265,7 +368,7 @@ def _run_worker(
         if shot:
             _save_screenshot(task_output, step, shot, step_timestamp)
             try:
-                obs_content = _build_screenshot_observation(step, shot)
+                obs_content = _build_screenshot_observation(step, shot, resize=needs_resize)
             except Exception as e:
                 logger.warning("%s Corrupt screenshot at step %d: %s", tag, step, e)
                 obs_content = [
@@ -419,8 +522,8 @@ def _save_screenshot(output_dir: str, step: int, shot: bytes, timestamp: float):
         f.write(f"{timestamp:.6f}\n")
 
 
-def _build_screenshot_observation(step: int, shot: bytes) -> List[Dict[str, Any]]:
-    resized = _resize_screenshot(shot)
+def _build_screenshot_observation(step: int, shot: bytes, resize: bool = True) -> List[Dict[str, Any]]:
+    img_bytes = _resize_screenshot(shot) if resize else shot
     return [
         {"type": "text", "text": f"Step {step}: current desktop state."},
         {
@@ -428,7 +531,7 @@ def _build_screenshot_observation(step: int, shot: bytes) -> List[Dict[str, Any]
             "source": {
                 "type": "base64",
                 "media_type": "image/png",
-                "data": base64.b64encode(resized).decode(),
+                "data": base64.b64encode(img_bytes).decode(),
             },
         },
     ]
@@ -449,15 +552,9 @@ def _save_action(output_dir: str, step: int, tool_input: Dict[str, Any]):
 class Orchestrator:
     """Central hub that assigns subtasks, collects results, and coordinates.
 
-    Flow:
-      1. Launch initial subtasks on displays (from planner)
-      2. Run orchestrator loop: every few seconds, check for completed agents
-      3. When an agent completes: collect result, consult LLM for next action
-         - ASSIGN: give a new subtask to an idle display
-         - MESSAGE: send instructions to a running agent
-         - WAIT: do nothing, agents are still working
-         - DONE: overall task is complete, stop everything
-      4. When all agents idle and orchestrator says DONE, return results
+    Uses structured tool_use for decisions (peek, assign, message, done).
+    Accumulates conversation history so it remembers past decisions.
+    Reuses displays from completed agents for new subtasks.
     """
 
     def __init__(
@@ -493,6 +590,11 @@ class Orchestrator:
         self._start_time: Optional[float] = None
         self._agent_counter = 0
         self._newly_completed: List[str] = []
+        self._decision_count = 0
+        self._orch_output_dir = os.path.join(output_dir, "_orchestrator")
+        os.makedirs(self._orch_output_dir, exist_ok=True)
+        self._orch_history: List[Dict[str, Any]] = []
+        self._completed_displays: Dict[str, int] = {}
 
         for st in subtasks:
             self._all_subtasks[st.id] = st
@@ -514,7 +616,7 @@ class Orchestrator:
             "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
         )
 
-        check_interval = 15
+        check_interval = 45
         last_check_time = 0.0
 
         while (time.time() - self._start_time) < self.task_timeout:
@@ -553,15 +655,37 @@ class Orchestrator:
             if trigger:
                 last_check_time = time.time()
                 elapsed = time.time() - self._start_time
+                self._decision_count += 1
+                step_num = self._decision_count
 
+                status_lines = []
+                status_lines.append(f"trigger: {trigger}")
+                status_lines.append(f"elapsed: {elapsed:.0f}s")
+                status_lines.append(f"running:")
                 for st in running:
+                    status_lines.append(f"  {st.id}: step {st.step_count}, display :{st.display_num}")
                     logger.info(
-                        "[orchestrator] check (%s, %.0fs) — %s: step %d, display :%s",
-                        trigger, elapsed, st.id, st.step_count, st.display_num,
+                        "[orchestrator] check #%d (%s, %.0fs) — %s: step %d, display :%s",
+                        step_num, trigger, elapsed, st.id, st.step_count, st.display_num,
                     )
+                status_lines.append(f"completed:")
+                for st in completed:
+                    status_lines.append(f"  {st.id}: {st.status} ({st.step_count} steps)")
+                if newly:
+                    status_lines.append(f"newly_completed: {newly}")
+
+                with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_context.txt"), "w") as f:
+                    f.write("\n".join(status_lines))
 
                 action = self._decide_next(orch_bedrock, running, completed)
-                logger.info("[orchestrator] action taken: %s", action)
+                logger.info("[orchestrator] decision #%d action: %s", step_num, action)
+
+                # Release any completed displays that weren't reused this cycle
+                with self._lock:
+                    for old_agent, old_display in list(self._completed_displays.items()):
+                        self.display_pool.release(old_display)
+                        logger.info("[orchestrator] Released unused display :%d from %s", old_display, old_agent)
+                    self._completed_displays.clear()
 
                 if action == "DONE":
                     logger.info("[orchestrator] Overall task is DONE")
@@ -586,7 +710,7 @@ class Orchestrator:
 
         agent_summaries = {}
         for st in self._all_subtasks.values():
-            summary = st.result.get("summary", "")[:300] if st.result else ""
+            summary = st.result.get("summary", "") if st.result else ""
             agent_summaries[st.id] = {
                 "status": st.status,
                 "steps_used": st.step_count,
@@ -605,19 +729,27 @@ class Orchestrator:
             "agents": agent_summaries,
         }
 
-    def _launch_agent(self, subtask: Subtask):
+    def _launch_agent(
+        self,
+        subtask: Subtask,
+        reuse_display: Optional[int] = None,
+        prior_context: Optional[Dict[str, Any]] = None,
+    ):
         """Allocate a display and start an agent thread for a subtask."""
-        display_num = self.display_pool.allocate(agent_id=subtask.id)
-        if display_num is None:
-            logger.error("No display available for %s", subtask.id)
-            subtask.status = "failed"
-            subtask.result = {"status": "FAIL", "summary": "No display available"}
-            return
+        if reuse_display is not None:
+            display_num = reuse_display
+        else:
+            display_num = self.display_pool.allocate(agent_id=subtask.id)
+            if display_num is None:
+                logger.error("No display available for %s", subtask.id)
+                subtask.status = "failed"
+                subtask.result = {"status": "FAIL", "summary": "No display available"}
+                return
 
         subtask.display_num = display_num
         thread = threading.Thread(
             target=self._run_agent,
-            args=(subtask,),
+            args=(subtask, prior_context),
             daemon=True,
             name=f"agent-{subtask.id}",
         )
@@ -625,7 +757,7 @@ class Orchestrator:
         thread.start()
         logger.info("Launched %s on display :%d", subtask.id, display_num)
 
-    def _run_agent(self, subtask: Subtask):
+    def _run_agent(self, subtask: Subtask, prior_context: Optional[Dict[str, Any]] = None):
         """Run setup + worker for one subtask. Notifies orchestrator on completion."""
         tag = f"[{subtask.id}]"
         try:
@@ -654,6 +786,7 @@ class Orchestrator:
                 output_dir=self.output_dir,
                 password=self.password,
                 orchestrator=self,
+                prior_context=prior_context,
             )
 
             subtask.result = result
@@ -667,7 +800,8 @@ class Orchestrator:
 
         finally:
             if subtask.display_num is not None:
-                self.display_pool.release(subtask.display_num)
+                with self._lock:
+                    self._completed_displays[subtask.id] = subtask.display_num
             with self._lock:
                 self._newly_completed.append(subtask.id)
 
@@ -677,84 +811,156 @@ class Orchestrator:
         running: List[Subtask],
         completed: List[Subtask],
     ) -> str:
-        """Ask LLM what to do after an agent completed. Returns action taken."""
+        """Ask LLM what to do via tool use. Returns 'DONE' or 'WAIT'."""
         completed_lines = []
         for st in completed:
-            summary = st.result.get("summary", "")[:500] if st.result else "(no result)"
+            summary = st.result.get("summary", "") if st.result else "(no result)"
             completed_lines.append(f"  [{st.id}] ({st.status}, {st.step_count} steps): {summary}")
 
         running_lines = []
         for st in running:
-            latest = st.latest_response[:200] if st.latest_response else "(no response yet)"
+            latest = st.latest_response if st.latest_response else "(no response yet)"
             running_lines.append(
                 f"  [{st.id}] display:{st.display_num} step:{st.step_count} "
-                f"task: {st.task[:100]}\n    latest: {latest}"
+                f"task: {st.task}\n    latest: {latest}"
             )
 
         idle_displays = self.display_pool.get_idle_count()
+        elapsed = time.time() - self._start_time
 
-        prompt = _ORCHESTRATOR_PROMPT.format(
-            root_task=self.root_task[:500],
+        prompt = f"[{elapsed:.0f}s elapsed]\n\n" + _ORCHESTRATOR_PROMPT.format(
+            root_task=self.root_task,
             completed_results="\n".join(completed_lines) if completed_lines else "(none)",
             running_agents="\n".join(running_lines) if running_lines else "(none idle)",
             idle_displays=idle_displays,
         )
 
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        step_num = self._decision_count
+
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_prompt.txt"), "w") as f:
+            f.write(prompt)
+
+        self._orch_history.append(
+            {"role": "user", "content": [{"type": "text", "text": prompt}]}
+        )
 
         try:
             content_blocks, _ = bedrock.chat(
-                messages=messages,
+                messages=self._orch_history,
                 system="You are a task orchestrator. Be concise and decisive.",
                 model=self.model,
                 temperature=0.3,
-                max_tokens=800,
+                max_tokens=4096,
+                tools=_ORCHESTRATOR_TOOLS,
             )
         except Exception as e:
             logger.warning("[orchestrator] LLM decision failed: %s", e)
+            self._orch_history.pop()
             return "WAIT"
 
-        response = "".join(
+        self._orch_history.append({"role": "assistant", "content": content_blocks})
+
+        response_text = "".join(
             b.get("text", "") for b in content_blocks
             if isinstance(b, dict) and b.get("type") == "text"
         )
-        logger.info("[orchestrator] Decision: %s", response[:300])
+        logger.info("[orchestrator] Decision #%d: %s", step_num, response_text[:300])
 
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_response.txt"), "w") as f:
+            f.write(response_text)
+
+        # Process tool calls
         result_action = "WAIT"
         peek_ids: List[str] = []
+        actions_taken: List[str] = []
+        tool_results: List[Dict[str, Any]] = []
 
-        for line in response.strip().split("\n"):
-            line = line.strip()
+        for block in content_blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
 
-            if line.startswith("PEEK "):
-                agent_id = line[len("PEEK "):].strip()
+            tool_name = block.get("name", "")
+            tool_id = block.get("id", "")
+            tool_input = block.get("input", {})
+            agent_id = _clean_agent_id(tool_input.get("agent_id", ""))
+
+            if tool_name == "peek_agent":
                 if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
                     peek_ids.append(agent_id)
+                    actions_taken.append(f"PEEK {agent_id}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": "Peek results will follow.",
+                    })
+                else:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": f"Agent '{agent_id}' not found or not running.",
+                    })
 
-            elif line.startswith("ASSIGN "):
-                rest = line[len("ASSIGN "):]
-                if ":" in rest:
-                    agent_id, task_desc = rest.split(":", 1)
-                    agent_id = agent_id.strip()
-                    task_desc = task_desc.strip()
-                    if task_desc:
-                        self._assign_new_subtask(agent_id, task_desc, response)
+            elif tool_name == "assign_subtask":
+                task_desc = tool_input.get("task", "")
+                setup = tool_input.get("setup", [])
+                if task_desc:
+                    self._assign_new_subtask_structured(agent_id, task_desc, setup)
+                    actions_taken.append(f"ASSIGN {agent_id}: {task_desc[:80]}")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": f"Agent '{agent_id}' launched.",
+                })
 
-            elif line.startswith("MESSAGE "):
-                rest = line[len("MESSAGE "):]
-                if ":" in rest:
-                    agent_id, msg = rest.split(":", 1)
-                    agent_id = agent_id.strip()
-                    msg = msg.strip()
-                    if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
-                        self.send_message(agent_id, msg)
-                        logger.info("[orchestrator] -> %s: %s", agent_id, msg[:120])
+            elif tool_name == "message_agent":
+                msg = tool_input.get("message", "")
+                if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
+                    self.send_message(agent_id, msg)
+                    actions_taken.append(f"MESSAGE {agent_id}: {msg[:80]}")
+                    logger.info("[orchestrator] -> %s: %s", agent_id, msg[:120])
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": f"Message delivered to '{agent_id}'.",
+                    })
+                else:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": f"Agent '{agent_id}' not found or not running.",
+                    })
 
-            elif line.strip() == "DONE":
+            elif tool_name == "mark_done":
                 result_action = "DONE"
+                actions_taken.append("DONE")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": "Task marked as done.",
+                })
+
+        # Ensure EVERY tool_use block has a matching tool_result
+        handled_ids = {tr["tool_use_id"] for tr in tool_results}
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if block.get("id") not in handled_ids:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": "Acknowledged.",
+                    })
+
+        if tool_results:
+            self._orch_history.append({"role": "user", "content": tool_results})
+
+        if not actions_taken:
+            actions_taken.append("WAIT")
+
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_action.txt"), "w") as f:
+            f.write("\n".join(actions_taken))
 
         if peek_ids and result_action != "DONE":
-            followup = self._handle_peeks(bedrock, peek_ids, running, completed)
+            followup = self._handle_peeks(bedrock, peek_ids, running, completed, step_num)
             if followup == "DONE":
                 result_action = "DONE"
 
@@ -766,9 +972,12 @@ class Orchestrator:
         peek_ids: List[str],
         running: List[Subtask],
         completed: List[Subtask],
+        step_num: int,
     ) -> str:
         """Show peeked agents' full conversation history and ask LLM for follow-up."""
+        elapsed = time.time() - self._start_time
         parts = [
+            f"[{elapsed:.0f}s elapsed] "
             f"You peeked at {len(peek_ids)} agent(s). "
             "Here is each agent's full conversation history (what it said and did at each step). "
             "Decide: MESSAGE, ASSIGN, WAIT, or DONE.\n"
@@ -777,7 +986,7 @@ class Orchestrator:
         for agent_id in peek_ids:
             st = self._all_subtasks[agent_id]
             parts.append(f"\n--- [{agent_id}] display:{st.display_num} step:{st.step_count} ---")
-            parts.append(f"Task: {st.task[:300]}")
+            parts.append(f"Task: {st.task}")
             if st.step_history:
                 parts.append("History:")
                 for entry in st.step_history:
@@ -788,78 +997,136 @@ class Orchestrator:
 
         prompt = "\n".join(parts)
 
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_peek_prompt.txt"), "w") as f:
+            f.write(prompt)
+
+        self._orch_history.append(
+            {"role": "user", "content": [{"type": "text", "text": prompt}]}
+        )
 
         try:
             content_blocks, _ = bedrock.chat(
-                messages=messages,
+                messages=self._orch_history,
                 system="You are a task orchestrator reviewing agent progress. Be concise and decisive.",
                 model=self.model,
                 temperature=0.3,
-                max_tokens=800,
+                max_tokens=4096,
+                tools=_ORCHESTRATOR_TOOLS,
             )
         except Exception as e:
             logger.warning("[orchestrator] PEEK follow-up LLM failed: %s", e)
+            self._orch_history.pop()
             return "WAIT"
 
-        response = "".join(
+        self._orch_history.append({"role": "assistant", "content": content_blocks})
+
+        response_text = "".join(
             b.get("text", "") for b in content_blocks
             if isinstance(b, dict) and b.get("type") == "text"
         )
-        logger.info("[orchestrator] PEEK decision: %s", response[:300])
+        logger.info("[orchestrator] PEEK decision #%d: %s", step_num, response_text[:300])
+
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_peek_response.txt"), "w") as f:
+            f.write(response_text)
 
         result_action = "WAIT"
-        for line in response.strip().split("\n"):
-            line = line.strip()
+        peek_actions: List[str] = []
+        tool_results: List[Dict[str, Any]] = []
 
-            if line.startswith("MESSAGE "):
-                rest = line[len("MESSAGE "):]
-                if ":" in rest:
-                    agent_id, msg = rest.split(":", 1)
-                    agent_id = agent_id.strip()
-                    msg = msg.strip()
-                    if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
-                        self.send_message(agent_id, msg)
-                        logger.info("[orchestrator] PEEK -> %s: %s", agent_id, msg[:120])
+        for block in content_blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
 
-            elif line.startswith("ASSIGN "):
-                rest = line[len("ASSIGN "):]
-                if ":" in rest:
-                    agent_id, task_desc = rest.split(":", 1)
-                    agent_id = agent_id.strip()
-                    task_desc = task_desc.strip()
-                    if task_desc:
-                        self._assign_new_subtask(agent_id, task_desc, response)
+            tool_name = block.get("name", "")
+            tool_id = block.get("id", "")
+            tool_input = block.get("input", {})
+            agent_id = _clean_agent_id(tool_input.get("agent_id", ""))
 
-            elif line.strip() == "DONE":
+            if tool_name == "message_agent":
+                msg = tool_input.get("message", "")
+                if agent_id in self._all_subtasks and self._all_subtasks[agent_id].status == "running":
+                    self.send_message(agent_id, msg)
+                    peek_actions.append(f"MESSAGE {agent_id}: {msg[:80]}")
+                    logger.info("[orchestrator] PEEK -> %s: %s", agent_id, msg[:120])
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tool_id,
+                    "content": f"Message delivered to '{agent_id}'.",
+                })
+
+            elif tool_name == "assign_subtask":
+                task_desc = tool_input.get("task", "")
+                setup = tool_input.get("setup", [])
+                if task_desc:
+                    self._assign_new_subtask_structured(agent_id, task_desc, setup)
+                    peek_actions.append(f"ASSIGN {agent_id}: {task_desc[:80]}")
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tool_id,
+                    "content": f"Agent '{agent_id}' launched.",
+                })
+
+            elif tool_name == "mark_done":
                 result_action = "DONE"
+                peek_actions.append("DONE")
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tool_id,
+                    "content": "Task marked as done.",
+                })
+
+        # Ensure EVERY tool_use block has a matching tool_result
+        handled_ids = {tr["tool_use_id"] for tr in tool_results}
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if block.get("id") not in handled_ids:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": "Acknowledged.",
+                    })
+
+        if tool_results:
+            self._orch_history.append({"role": "user", "content": tool_results})
+
+        if not peek_actions:
+            peek_actions.append("WAIT")
+
+        with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_peek_action.txt"), "w") as f:
+            f.write("\n".join(peek_actions))
 
         return result_action
 
-    def _assign_new_subtask(self, agent_id: str, task_desc: str, full_response: str):
-        """Create and launch a new subtask on an idle display."""
-        setup: List[Dict[str, Any]] = []
-        for line in full_response.split("\n"):
-            line = line.strip()
-            if line.startswith("SETUP:"):
-                setup_str = line[len("SETUP:"):].strip()
-                if setup_str.lower() != "none":
-                    try:
-                        parsed = json.loads(setup_str)
-                        setup = [parsed] if isinstance(parsed, dict) else parsed
-                    except json.JSONDecodeError:
-                        pass
-                break
-
+    def _assign_new_subtask_structured(
+        self, agent_id: str, task_desc: str, setup: Optional[List[Dict[str, Any]]] = None
+    ):
+        """Create and launch a new subtask (structured input from tool use)."""
         if agent_id in self._all_subtasks:
             self._agent_counter += 1
             agent_id = f"{agent_id}_{self._agent_counter}"
 
-        subtask = Subtask(id=agent_id, task=task_desc, setup=setup)
+        # Try to reuse a display from a recently completed agent (keeps app state)
+        reuse_display = None
+        prior_context = None
+        with self._lock:
+            if self._completed_displays:
+                reuse_agent, reuse_display = next(iter(self._completed_displays.items()))
+                del self._completed_displays[reuse_agent]
+                prev_subtask = self._all_subtasks.get(reuse_agent)
+                if prev_subtask:
+                    prior_context = {
+                        "agent_id": reuse_agent,
+                        "task": prev_subtask.task,
+                        "result": prev_subtask.result.get("summary", "") if prev_subtask.result else "",
+                        "step_history": prev_subtask.step_history,
+                    }
+                logger.info(
+                    "[orchestrator] Reusing display :%d from completed agent %s",
+                    reuse_display, reuse_agent,
+                )
+
+        subtask = Subtask(id=agent_id, task=task_desc, setup=setup or [])
         with self._lock:
             self._all_subtasks[agent_id] = subtask
 
-        self._launch_agent(subtask)
+        self._launch_agent(subtask, reuse_display=reuse_display, prior_context=prior_context)
         logger.info("[orchestrator] Assigned new subtask: %s — %s", agent_id, task_desc[:80])
 
     def send_message(self, agent_id: str, message: str):
