@@ -594,7 +594,6 @@ class Orchestrator:
 
     def __init__(
         self,
-        subtasks: List[Subtask],
         display_pool: DisplayPool,
         vm_exec: Callable[[str], Optional[dict]],
         bedrock_factory: Callable[[str, str], Any],
@@ -605,6 +604,7 @@ class Orchestrator:
         task_timeout: float = 1200.0,
         password: str = "osworld-public-evaluation",
         root_task: str = "",
+        initial_screenshot: Optional[bytes] = None,
     ):
         self.display_pool = display_pool
         self.vm_exec = vm_exec
@@ -633,9 +633,7 @@ class Orchestrator:
         self._orchestrator_done = False
         self._done_time: Optional[float] = None
         self._execution_log: List[Dict[str, Any]] = []
-
-        for st in subtasks:
-            self._all_subtasks[st.id] = st
+        self._initial_screenshot = initial_screenshot
 
     def run(self) -> Dict[str, Any]:
         """Main loop: launch initial subtasks, then monitor and react."""
@@ -647,11 +645,7 @@ class Orchestrator:
         with self._lock:
             self._bedrock_clients["orchestrator"] = orch_bedrock
 
-        # Don't launch anything yet — let the orchestrator decide
-        # what to launch first based on the plan
-        logger.info(
-            "Orchestrator started with plan: %d subtask(s)", len(self._all_subtasks)
-        )
+        logger.info("Orchestrator started — will plan and assign on first turn")
 
         self._work_start_time = time.time()
 
@@ -673,18 +667,16 @@ class Orchestrator:
                 newly = list(self._newly_completed)
                 self._newly_completed.clear()
 
-            pending = [
-                st for st in self._all_subtasks.values()
-                if st.status == "pending"
-            ]
-
-            if not running and not newly and not pending:
+            if not running and not newly and self._decision_count > 0:
                 logger.info("[orchestrator] All agents finished")
                 break
 
             trigger = None
 
-            if newly:
+            if self._decision_count == 0:
+                trigger = "initial"
+
+            elif newly:
                 for agent_id in newly:
                     st = self._all_subtasks[agent_id]
                     logger.info(
@@ -692,9 +684,6 @@ class Orchestrator:
                         st.id, st.status, st.step_count,
                     )
                 trigger = "completion"
-
-            elif not running and pending:
-                trigger = "launch"
 
             elif running and (time.time() - last_check_time) >= check_interval:
                 trigger = "periodic"
@@ -813,7 +802,7 @@ class Orchestrator:
         self._threads[subtask.id] = thread
         thread.start()
         logger.info("Launched %s on display :%d", subtask.id, display_num)
-        self._log_event("launch", agent_id=subtask.id, display=display_num, task=subtask.task[:200])
+        self._log_event("launch", agent_id=subtask.id, display=display_num, task=subtask.task)
 
     def _run_agent(self, subtask: Subtask, prior_context: Optional[Dict[str, Any]] = None):
         """Run setup + worker for one subtask. Notifies orchestrator on completion."""
@@ -891,11 +880,6 @@ class Orchestrator:
         idle_displays = self.display_pool.get_idle_count()
         elapsed = time.time() - self._start_time
 
-        pending_lines = []
-        for st in self._all_subtasks.values():
-            if st.status == "pending":
-                pending_lines.append(f"  [{st.id}]: {st.task[:150]}")
-
         prompt = f"[{elapsed:.0f}s elapsed]\n\n" + _ORCHESTRATOR_PROMPT.format(
             root_task=self.root_task,
             completed_results="\n".join(completed_lines) if completed_lines else "(none)",
@@ -903,18 +887,30 @@ class Orchestrator:
             idle_displays=idle_displays,
         )
 
-        if pending_lines:
-            prompt += "\n\nPlanned subtasks (not yet launched — use assign_subtask to launch):\n"
-            prompt += "\n".join(pending_lines)
-
         step_num = self._decision_count
 
         with open(os.path.join(self._orch_output_dir, f"step_{step_num:03d}_prompt.txt"), "w") as f:
             f.write(prompt)
 
-        self._orch_history.append(
-            {"role": "user", "content": [{"type": "text", "text": prompt}]}
-        )
+        msg_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+
+        # Include screenshot on first turn so orchestrator sees the display state
+        if self._initial_screenshot and self._decision_count == 1:
+            try:
+                resized = _resize_screenshot(self._initial_screenshot)
+                msg_content.append({"type": "text", "text": "Current state of the primary display (display :0):"})
+                msg_content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64.b64encode(resized).decode(),
+                    },
+                })
+            except Exception as e:
+                logger.warning("Failed to include screenshot: %s", e)
+
+        self._orch_history.append({"role": "user", "content": msg_content})
 
         try:
             content_blocks, _ = bedrock.chat(
@@ -1199,7 +1195,7 @@ class Orchestrator:
             self._all_subtasks[agent_id] = subtask
 
         self._launch_agent(subtask, reuse_display=reuse_display, prior_context=prior_context)
-        self._log_event("assign", agent_id=agent_id, task=task_desc[:200],
+        self._log_event("assign", agent_id=agent_id, task=task_desc,
                        reused_display=reuse_display)
         logger.info("[orchestrator] Assigned new subtask: %s — %s", agent_id, task_desc[:80])
 
@@ -1220,7 +1216,7 @@ class Orchestrator:
         """Send a coordination message to a running subagent."""
         with self._lock:
             self._messages.setdefault(agent_id, []).append(message)
-        self._log_event("message", agent_id=agent_id, message=message[:200])
+        self._log_event("message", agent_id=agent_id, message=message)
         logger.info("Message -> %s: %s", agent_id, message[:120])
 
     def get_pending_messages(self, agent_id: str) -> List[str]:
