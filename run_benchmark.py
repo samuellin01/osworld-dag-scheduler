@@ -559,6 +559,7 @@ def run_single_task(task_data, args, output_base):
         output_dir=output_dir,
         task_timeout=1200.0,
         password="osworld-public-evaluation",
+        root_task=instruction,
     )
 
     orchestrator_result = orchestrator.run()
