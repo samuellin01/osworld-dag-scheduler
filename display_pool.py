@@ -106,6 +106,13 @@ class DisplayPool:
         # Detect best available desktop environment: XFCE > openbox
         self._desktop = self._detect_desktop()
 
+        # Disable screen lock/screensaver on all displays
+        self.vm_exec(
+            "DISPLAY=:0 xset s off s noblank -dpms 2>/dev/null; "
+            "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null; "
+            "gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true"
+        )
+
         # Mark primary display :0 as ready (already running, no Xvfb needed)
         if self.include_primary:
             with self._lock:
@@ -169,7 +176,9 @@ class DisplayPool:
             desktop_cmd = (
                 f"export DISPLAY=:{display_num}; "
                 f"nohup dbus-launch --exit-with-session xfce4-session "
-                f">/dev/null 2>&1 & sleep 3"
+                f">/dev/null 2>&1 & sleep 3; "
+                f"xfce4-screensaver-command --deactivate 2>/dev/null; "
+                f"xset s off s noblank -dpms 2>/dev/null || true"
             )
         else:
             desktop_cmd = (
