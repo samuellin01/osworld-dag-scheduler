@@ -126,8 +126,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--github_results_repo",
         type=str,
-        default="samuellin01/memory_experiments_3",
-        help="GitHub repository to upload results to (default: samuellin01/memory_experiments_3).",
+        default="samuellin01/memory_experiments",
+        help="GitHub repository to upload results to (default: samuellin01/memory_experiments).",
     )
     parser.add_argument(
         "--github_results_path",
