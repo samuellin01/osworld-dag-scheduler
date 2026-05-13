@@ -321,8 +321,9 @@ def _process_google_workspace_config(task_data: Dict[str, Any]) -> Dict[str, Any
             new_config.append(item)
 
         elif item_type == "chrome_open_tabs":
-            # Don't add yet - we'll add at the end
-            pass
+            # Collect URLs from existing chrome_open_tabs configs
+            urls = item.get("parameters", {}).get("urls_to_open", [])
+            chrome_urls.extend(urls)
 
         else:
             # Keep everything else (download, open, sleep, etc.)
