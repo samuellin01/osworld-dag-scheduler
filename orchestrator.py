@@ -806,7 +806,9 @@ class Orchestrator:
         try:
             subtask.status = "running"
 
-            if subtask.setup and subtask.display_num is not None:
+            # Skip setup on display :0 — it already has env setup (Chrome, apps, etc.)
+            should_setup = subtask.setup and subtask.display_num is not None and subtask.display_num != 0
+            if should_setup:
                 executor = SetupExecutor(
                     display_num=subtask.display_num, vm_exec=self.vm_exec
                 )
