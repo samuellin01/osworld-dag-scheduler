@@ -680,6 +680,67 @@ def generate_trajectory_html(
 
     all_actions.sort(key=lambda x: x['timestamp'])
 
+    # -- Parse orchestrator decisions from step files -----------------------
+
+    orch_decisions: List[Dict] = []
+    orch_dir = local_path / "_orchestrator"
+    if orch_dir.is_dir():
+        step_num = 1
+        while True:
+            ctx_file = orch_dir / f"step_{step_num:03d}_context.txt"
+            if not ctx_file.is_file():
+                break
+            try:
+                ctx = ctx_file.read_text(encoding='utf-8', errors='replace').strip()
+            except OSError:
+                ctx = ''
+            try:
+                action = (orch_dir / f"step_{step_num:03d}_action.txt").read_text(
+                    encoding='utf-8', errors='replace').strip()
+            except OSError:
+                action = ''
+            try:
+                response = (orch_dir / f"step_{step_num:03d}_response.txt").read_text(
+                    encoding='utf-8', errors='replace').strip()
+            except OSError:
+                response = ''
+
+            # Parse elapsed from context
+            elapsed = 0.0
+            trigger = ''
+            for line in ctx.split('\n'):
+                line = line.strip()
+                if line.startswith('elapsed:'):
+                    raw = line.split(':', 1)[1].strip().rstrip('s')
+                    try:
+                        elapsed = float(raw)
+                    except ValueError:
+                        pass
+                elif line.startswith('trigger:'):
+                    trigger = line.split(':', 1)[1].strip()
+
+            # Determine decision type from action text
+            decision_type = 'wait'
+            if action.startswith('ASSIGN'):
+                decision_type = 'assign'
+            elif action.startswith('PEEK'):
+                decision_type = 'peek'
+            elif action.startswith('MESSAGE'):
+                decision_type = 'message'
+            elif action.startswith('DONE'):
+                decision_type = 'done'
+
+            orch_decisions.append({
+                'step': step_num,
+                'elapsed': elapsed,
+                'trigger': trigger,
+                'context': ctx,
+                'action': action,
+                'response': response,
+                'type': decision_type,
+            })
+            step_num += 1
+
     # -- Collect manager decisions (legacy DAG format) ----------------------
 
     all_manager_decisions = []
@@ -1279,6 +1340,100 @@ h2 {{
 .comm-legend-item.message .comm-legend-label {{ color: #f7d058; }}
 .comm-legend-item.peek .comm-legend-label {{ color: #58a6ff; }}
 .comm-legend-item.report .comm-legend-label {{ color: #3fb950; }}
+
+/* Orchestrator decision cards */
+.orch-decision {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 12px;
+    transition: all 0.15s;
+}}
+.orch-decision:hover {{
+    border-color: #484f58;
+}}
+.orch-decision-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}}
+.orch-decision-meta {{
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}}
+.orch-badge {{
+    font-size: 0.75em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}}
+.orch-badge-assign {{
+    background: rgba(163, 113, 247, 0.15);
+    color: #a371f7;
+}}
+.orch-badge-peek {{
+    background: rgba(88, 166, 255, 0.15);
+    color: #58a6ff;
+}}
+.orch-badge-message {{
+    background: rgba(247, 208, 88, 0.15);
+    color: #f7d058;
+}}
+.orch-badge-wait {{
+    background: rgba(139, 148, 158, 0.15);
+    color: #8b949e;
+}}
+.orch-badge-done {{
+    background: rgba(63, 185, 80, 0.15);
+    color: #3fb950;
+}}
+.orch-trigger {{
+    font-size: 0.75em;
+    color: #6e7681;
+    font-style: italic;
+}}
+.orch-decision-context {{
+    font-size: 0.8em;
+    color: #8b949e;
+    padding: 8px 10px;
+    background: #0d1117;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    white-space: pre-wrap;
+    font-family: 'SF Mono', Monaco, monospace;
+    line-height: 1.5;
+    max-height: 120px;
+    overflow-y: auto;
+}}
+.orch-decision-action {{
+    font-size: 0.85em;
+    color: #e6edf3;
+    padding: 8px 10px;
+    background: rgba(88, 166, 255, 0.05);
+    border-left: 3px solid #58a6ff;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 8px;
+    white-space: pre-wrap;
+    font-family: 'SF Mono', Monaco, monospace;
+    line-height: 1.5;
+    max-height: 150px;
+    overflow-y: auto;
+}}
+.orch-decision-response {{
+    font-size: 0.85em;
+    color: #c9d1d9;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 6px;
+    line-height: 1.6;
+    max-height: 150px;
+    overflow-y: auto;
+}}
 """)
     h.append("</style>")
     h.append("</head>")
@@ -1438,6 +1593,8 @@ h2 {{
     # Tabs
     h.append("<div class='tabs'>")
     h.append("  <div class='tab active' onclick='showTab(\"log\")'>📋 Action Log</div>")
+    if orch_decisions:
+        h.append("  <div class='tab' onclick='showTab(\"orchestrator\")'>🧠 Orchestrator</div>")
     if all_manager_decisions:
         h.append("  <div class='tab' onclick='showTab(\"managers\")'>🧠 Manager Decisions</div>")
     h.append("</div>")
@@ -1474,6 +1631,43 @@ h2 {{
 
     h.append("  </div>")
     h.append("</div>")
+
+    # Orchestrator Decisions tab
+    if orch_decisions:
+        h.append("<div id='tab-orchestrator' class='tab-content'>")
+
+        for dec in orch_decisions:
+            time_str = fmt_duration(dec['elapsed'])
+            dtype = dec['type']
+            badge_class = f'orch-badge-{dtype}'
+
+            h.append(f"  <div class='orch-decision'>")
+            h.append(f"    <div class='orch-decision-header'>")
+            h.append(f"      <div class='orch-decision-meta'>")
+            h.append(f"        <span class='action-time'>{esc(time_str)}</span>")
+            h.append(f"        <span class='orch-badge {badge_class}'>Step {dec['step']}: {esc(dtype)}</span>")
+            h.append(f"      </div>")
+            h.append(f"      <span class='orch-trigger'>trigger: {esc(dec['trigger'])}</span>")
+            h.append(f"    </div>")
+
+            # Context (agent states)
+            ctx_lines = dec['context']
+            if ctx_lines:
+                h.append(f"    <div class='orch-decision-context'>{esc(ctx_lines)}</div>")
+
+            # Action
+            action_text = dec['action']
+            if action_text:
+                h.append(f"    <div class='orch-decision-action'>{esc(action_text)}</div>")
+
+            # Response (reasoning)
+            response_text = dec['response']
+            if response_text:
+                h.append(f"    <div class='orch-decision-response'>{esc(response_text)}</div>")
+
+            h.append(f"  </div>")
+
+        h.append("</div>")
 
     # Manager Decisions tab
     if all_manager_decisions:
