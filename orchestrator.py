@@ -115,9 +115,9 @@ reading files, or taking multiple steps is NORMAL — do not interrupt them. \
 Only message an agent if it has been stuck doing the same thing for many steps \
 with no progress, or is working on the wrong task entirely.
 
-You can restructure work while agents are running. If you see an agent doing \
-something that would be better handled separately, you can MESSAGE it to narrow \
-its scope and ASSIGN a new agent for the split-off piece.
+If an agent is doing work that could be parallelized, split it: MESSAGE the \
+agent to narrow its scope, then ASSIGN the split-off piece to a new agent. \
+This reduces wall-clock time by running independent work concurrently.
 
 Existing template content in documents and spreadsheets should not be modified, \
 reformatted, or deleted — it will be exact-matched during evaluation."""
