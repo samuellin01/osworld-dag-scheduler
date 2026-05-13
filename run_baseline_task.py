@@ -478,6 +478,9 @@ def run_task(
     else:
         env.reset()
 
+    logger.info("Letting environment settle (5s)...")
+    time.sleep(5)
+
     # Wait for the VM server to become healthy before running setup commands.
     import requests as _req
     _setup_url = f"http://{env.vm_ip}:{env.server_port}/setup/execute"
