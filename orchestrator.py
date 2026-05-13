@@ -201,11 +201,34 @@ def plan_subtasks(
     bedrock: Any,
     model: str,
     temperature: float = 0.3,
+    screenshot: Optional[bytes] = None,
 ) -> List[Subtask]:
     """Use LLM to decompose a task into parallel subtasks."""
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": f"Task: {task_description}"}]}
+    content: List[Dict[str, Any]] = [
+        {"type": "text", "text": f"Task: {task_description}"}
     ]
+
+    if screenshot:
+        try:
+            resized = _resize_screenshot(screenshot)
+            content.append({"type": "text", "text": "Current state of the primary display (display :0):"})
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64.b64encode(resized).decode(),
+                },
+            })
+            content.append({
+                "type": "text",
+                "text": "This display already has apps open from environment setup. "
+                        "Plan accordingly — you don't need to re-open what's already there.",
+            })
+        except Exception as e:
+            logger.warning("Failed to include screenshot in plan: %s", e)
+
+    messages = [{"role": "user", "content": content}]
 
     content_blocks, _ = bedrock.chat(
         messages=messages,
