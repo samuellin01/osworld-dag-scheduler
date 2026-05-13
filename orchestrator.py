@@ -89,6 +89,9 @@ return a single subtask.
 what to find/do and when to stop. Avoid open-ended instructions like "examine \
 all details" or "document everything". Example: "Read the file, extract the \
 answers, report them" NOT "carefully analyze the complete formatting details".
+- Subtask descriptions should only describe what to DO, not provide answers. \
+Agents discover information themselves.
+- Documents may have existing content — agents should preserve it, not delete it.
 
 Output ONLY the JSON object, no other text."""
 
@@ -113,7 +116,10 @@ IMPORTANT: Let agents work autonomously. Do NOT micromanage or send messages \
 unless an agent is clearly stuck or going completely off-track. Agents scrolling, \
 reading files, or taking multiple steps is NORMAL — do not interrupt them. \
 Only message an agent if it has been stuck doing the same thing for many steps \
-with no progress, or is working on the wrong task entirely."""
+with no progress, or is working on the wrong task entirely.
+
+Documents and spreadsheets may have existing template content. \
+Do not instruct agents to delete or overwrite it."""
 
 
 _ORCHESTRATOR_TOOLS = [
@@ -295,7 +301,8 @@ def _build_system_prompt(display_num: int, password: str) -> str:
         "SUBTASK FAILED: Setup did not work. Display shows [describe what you see].\n\n"
         "Google Docs/Sheets/Slides: multiple agents can open the same URL simultaneously.\n"
         "Google Workspace: Do NOT use Apps Script -- complete tasks through the UI.\n"
-        "Google Sheets: Use the Name Box (top-left) to jump to cells.\n\n"
+        "Google Sheets: Use the Name Box (top-left) to jump to cells.\n"
+        "Documents and spreadsheets may have existing template content — do not delete it.\n\n"
         "Focus only on your assigned task. Do not do extra work beyond what was asked."
     )
 
