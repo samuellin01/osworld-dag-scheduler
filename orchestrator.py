@@ -56,10 +56,12 @@ class Subtask:
 # ------------------------------------------------------------------
 
 _PLANNER_PROMPT = """\
-You are a task decomposition planner for a multi-agent computer-use system.
+You are a task planner for a multi-agent computer-use system.
 
-The system has multiple virtual displays. Each subtask gets its own display and \
-agent that works independently. Decompose the task into subtasks that run in parallel.
+The system has multiple virtual displays. Create a plan of subtasks. The \
+orchestrator will decide when to launch each subtask — not everything needs \
+to run in parallel. Subtasks that depend on other subtasks' results should \
+be listed but the orchestrator will launch them at the right time.
 
 Output a JSON object:
 {{
@@ -80,15 +82,10 @@ Output a JSON object:
 **Guidelines**:
 - Google Workspace: multiple agents CAN open the same Doc/Sheet/Slides URL \
 on different displays and edit collaboratively in real-time.
-- Maximize parallelism where work is truly independent.
 - Don't over-split: if a single agent can handle everything in ~30 actions, \
 return a single subtask.
 - Each subtask must be self-contained with all info the agent needs.
 - Each agent should include a detailed summary of its results when it completes.
-- Write task descriptions that are specific and bounded. Tell the agent exactly \
-what to find/do and when to stop. Avoid open-ended instructions like "examine \
-all details" or "document everything". Example: "Read the file, extract the \
-answers, report them" NOT "carefully analyze the complete formatting details".
 - Subtask descriptions should only describe what to DO, not provide answers. \
 Agents discover information themselves.
 - Documents may have existing content — agents should preserve it, not delete it.
@@ -117,6 +114,10 @@ unless an agent is clearly stuck or going completely off-track. Agents scrolling
 reading files, or taking multiple steps is NORMAL — do not interrupt them. \
 Only message an agent if it has been stuck doing the same thing for many steps \
 with no progress, or is working on the wrong task entirely.
+
+You can restructure work while agents are running. If you see an agent doing \
+something that would be better handled separately, you can MESSAGE it to narrow \
+its scope and ASSIGN a new agent for the split-off piece.
 
 Existing template content in documents and spreadsheets should not be modified, \
 reformatted, or deleted — it will be exact-matched during evaluation."""
@@ -631,6 +632,7 @@ class Orchestrator:
         self._completed_displays: Dict[str, int] = {}
         self._orchestrator_done = False
         self._done_time: Optional[float] = None
+        self._execution_log: List[Dict[str, Any]] = []
 
         for st in subtasks:
             self._all_subtasks[st.id] = st
@@ -645,11 +647,10 @@ class Orchestrator:
         with self._lock:
             self._bedrock_clients["orchestrator"] = orch_bedrock
 
-        for subtask in list(self._all_subtasks.values()):
-            self._launch_agent(subtask)
-
+        # Don't launch anything yet — let the orchestrator decide
+        # what to launch first based on the plan
         logger.info(
-            "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
+            "Orchestrator started with plan: %d subtask(s)", len(self._all_subtasks)
         )
 
         self._work_start_time = time.time()
@@ -672,7 +673,12 @@ class Orchestrator:
                 newly = list(self._newly_completed)
                 self._newly_completed.clear()
 
-            if not running and not newly:
+            pending = [
+                st for st in self._all_subtasks.values()
+                if st.status == "pending"
+            ]
+
+            if not running and not newly and not pending:
                 logger.info("[orchestrator] All agents finished")
                 break
 
@@ -686,6 +692,9 @@ class Orchestrator:
                         st.id, st.status, st.step_count,
                     )
                 trigger = "completion"
+
+            elif not running and pending:
+                trigger = "launch"
 
             elif running and (time.time() - last_check_time) >= check_interval:
                 trigger = "periodic"
@@ -728,6 +737,7 @@ class Orchestrator:
                 if action == "DONE":
                     self._orchestrator_done = True
                     self._done_time = time.time()
+                    self._log_event("done")
                     logger.info("[orchestrator] Overall task is DONE")
                     break
 
@@ -803,6 +813,7 @@ class Orchestrator:
         self._threads[subtask.id] = thread
         thread.start()
         logger.info("Launched %s on display :%d", subtask.id, display_num)
+        self._log_event("launch", agent_id=subtask.id, display=display_num, task=subtask.task[:200])
 
     def _run_agent(self, subtask: Subtask, prior_context: Optional[Dict[str, Any]] = None):
         """Run setup + worker for one subtask. Notifies orchestrator on completion."""
@@ -841,6 +852,9 @@ class Orchestrator:
             subtask.result = result
             subtask.status = "done" if result.get("status") == "DONE" else "failed"
             logger.info("%s Finished: %s (%d steps)", tag, subtask.status, subtask.step_count)
+            summary = result.get("summary", "")[:300] if result else ""
+            self._log_event("complete", agent_id=subtask.id, status=subtask.status,
+                          steps=subtask.step_count, summary=summary)
 
         except Exception as e:
             logger.error("%s Failed: %s", tag, e, exc_info=True)
@@ -877,12 +891,21 @@ class Orchestrator:
         idle_displays = self.display_pool.get_idle_count()
         elapsed = time.time() - self._start_time
 
+        pending_lines = []
+        for st in self._all_subtasks.values():
+            if st.status == "pending":
+                pending_lines.append(f"  [{st.id}]: {st.task[:150]}")
+
         prompt = f"[{elapsed:.0f}s elapsed]\n\n" + _ORCHESTRATOR_PROMPT.format(
             root_task=self.root_task,
             completed_results="\n".join(completed_lines) if completed_lines else "(none)",
-            running_agents="\n".join(running_lines) if running_lines else "(none idle)",
+            running_agents="\n".join(running_lines) if running_lines else "(none)",
             idle_displays=idle_displays,
         )
+
+        if pending_lines:
+            prompt += "\n\nPlanned subtasks (not yet launched — use assign_subtask to launch):\n"
+            prompt += "\n".join(pending_lines)
 
         step_num = self._decision_count
 
@@ -1176,12 +1199,28 @@ class Orchestrator:
             self._all_subtasks[agent_id] = subtask
 
         self._launch_agent(subtask, reuse_display=reuse_display, prior_context=prior_context)
+        self._log_event("assign", agent_id=agent_id, task=task_desc[:200],
+                       reused_display=reuse_display)
         logger.info("[orchestrator] Assigned new subtask: %s — %s", agent_id, task_desc[:80])
+
+    def _log_event(self, event_type: str, **kwargs):
+        """Record an event to the execution log."""
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        entry = {"time": round(elapsed, 1), "event": event_type, **kwargs}
+        self._execution_log.append(entry)
+        # Save after each event so it's always up to date
+        log_path = os.path.join(self._orch_output_dir, "execution_log.json")
+        try:
+            with open(log_path, "w") as f:
+                json.dump(self._execution_log, f, indent=2)
+        except Exception:
+            pass
 
     def send_message(self, agent_id: str, message: str):
         """Send a coordination message to a running subagent."""
         with self._lock:
             self._messages.setdefault(agent_id, []).append(message)
+        self._log_event("message", agent_id=agent_id, message=message[:200])
         logger.info("Message -> %s: %s", agent_id, message[:120])
 
     def get_pending_messages(self, agent_id: str) -> List[str]:
