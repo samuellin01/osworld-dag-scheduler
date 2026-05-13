@@ -529,11 +529,17 @@ def run_single_task(task_data, args, output_base):
         region=args.region, log_dir=output_dir, agent_id="planner"
     )
 
+    # Take screenshot of display :0 so planner can see what's already set up
+    from xvfb_display import XvfbDisplay
+    primary_display = XvfbDisplay(vm_ip, port, 0)
+    initial_screenshot = primary_display.screenshot()
+
     logger.info("Planning subtasks...")
     subtasks = plan_subtasks(
         task_description=instruction,
         bedrock=planner_bedrock,
         model=args.model,
+        screenshot=initial_screenshot,
     )
 
     with open(os.path.join(output_dir, "plan.json"), "w") as f:
