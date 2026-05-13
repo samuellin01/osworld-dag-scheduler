@@ -118,8 +118,8 @@ reading files, or taking multiple steps is NORMAL — do not interrupt them. \
 Only message an agent if it has been stuck doing the same thing for many steps \
 with no progress, or is working on the wrong task entirely.
 
-Documents and spreadsheets may have existing template content. \
-Do not instruct agents to delete or overwrite it."""
+Existing template content in documents and spreadsheets should not be modified, \
+reformatted, or deleted — it will be exact-matched during evaluation."""
 
 
 _ORCHESTRATOR_TOOLS = [
@@ -327,7 +327,9 @@ def _build_system_prompt(display_num: int, password: str) -> str:
         "Google Docs/Sheets/Slides: multiple agents can open the same URL simultaneously.\n"
         "Google Workspace: Do NOT use Apps Script -- complete tasks through the UI.\n"
         "Google Sheets: Use the Name Box (top-left) to jump to cells.\n"
-        "Documents and spreadsheets may have existing template content — do not delete it.\n\n"
+        "Existing template content in documents and spreadsheets is meant to help you "
+        "and should not be modified, reformatted, or deleted — it will be exact-matched "
+        "during evaluation.\n\n"
         "Focus only on your assigned task. Do not do extra work beyond what was asked."
     )
 
