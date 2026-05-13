@@ -222,8 +222,10 @@ def plan_subtasks(
             })
             content.append({
                 "type": "text",
-                "text": "This display already has apps open from environment setup. "
-                        "Plan accordingly — you don't need to re-open what's already there.",
+                "text": "This is the primary display (display :0) which already has apps open "
+                        "from environment setup. Do NOT include setup steps for subtasks on this "
+                        "display — leave the setup array empty. Only include setup steps for "
+                        "subtasks that need a fresh display.",
             })
         except Exception as e:
             logger.warning("Failed to include screenshot in plan: %s", e)
@@ -806,9 +808,7 @@ class Orchestrator:
         try:
             subtask.status = "running"
 
-            # Skip setup on display :0 — it already has env setup (Chrome, apps, etc.)
-            should_setup = subtask.setup and subtask.display_num is not None and subtask.display_num != 0
-            if should_setup:
+            if subtask.setup and subtask.display_num is not None:
                 executor = SetupExecutor(
                     display_num=subtask.display_num, vm_exec=self.vm_exec
                 )
