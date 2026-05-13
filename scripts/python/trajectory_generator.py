@@ -436,7 +436,9 @@ def generate_trajectory_html(
 
     agent_timeline = timeline_data['agent_timeline']
     agent_steps_map = timeline_data['agent_steps_map']
-    total_duration = timeline_data['total_duration'] or duration
+    # Use result.json duration as authoritative (work_start to done_time)
+    # Fall back to timeline-calculated duration if result.json doesn't have it
+    total_duration = duration or timeline_data['total_duration']
 
     # Calculate cost from token usage
     cost = calculate_cost_from_tokens(local_path, api_calls)
@@ -576,9 +578,65 @@ def generate_trajectory_html(
                 'type': action_type,
             })
 
+    # -- Inject orchestrator events from execution_log.json ------------------
+
+    exec_log_path = local_path / "_orchestrator" / "execution_log.json"
+    if exec_log_path.is_file():
+        try:
+            with open(exec_log_path, 'r', encoding='utf-8') as f:
+                exec_events = json.load(f)
+            for evt in exec_events:
+                evt_type = evt.get('event', '')
+                evt_time = evt.get('time', 0)
+
+                if evt_type == 'launch':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'orchestrator',
+                        'step': '',
+                        'action': f"Launched agent '{evt.get('agent_id', '')}' on display :{evt.get('display', '?')}",
+                        'type': 'fork',
+                    })
+                elif evt_type == 'assign':
+                    task_preview = evt.get('task', '')[:150]
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'orchestrator',
+                        'step': '',
+                        'action': f"Assigned '{evt.get('agent_id', '')}': {task_preview}",
+                        'type': 'fork',
+                    })
+                elif evt_type == 'message':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'orchestrator',
+                        'step': '',
+                        'action': f"Message to '{evt.get('agent_id', '')}': {evt.get('message', '')[:200]}",
+                        'type': 'message',
+                    })
+                elif evt_type == 'complete':
+                    summary = evt.get('summary', '')[:150]
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': evt.get('agent_id', 'orchestrator'),
+                        'step': '',
+                        'action': f"Completed ({evt.get('status', '?')}, {evt.get('steps', '?')} steps): {summary}",
+                        'type': 'report',
+                    })
+                elif evt_type == 'done':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'orchestrator',
+                        'step': '',
+                        'action': 'Task marked as DONE',
+                        'type': 'report',
+                    })
+        except (json.JSONDecodeError, OSError) as e:
+            pass
+
     all_actions.sort(key=lambda x: x['timestamp'])
 
-    # -- Collect manager decisions -------------------------------------------
+    # -- Collect manager decisions (legacy DAG format) ----------------------
 
     all_manager_decisions = []
     for agent_id, agent_dir in agent_dirs:
