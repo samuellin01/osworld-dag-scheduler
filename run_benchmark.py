@@ -500,6 +500,9 @@ def run_single_task(task_data, args, output_base):
             logger.error(f"vm_exec failed: {e}")
         return None
 
+    logger.info("Letting environment settle (5s)...")
+    time.sleep(5)
+
     logger.info("Waiting for VM...")
     for _ in range(30):
         try:
