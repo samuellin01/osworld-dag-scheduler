@@ -1,4 +1,4 @@
-"""Regenerate trajectory.html for existing tasks in memory_experiments_3 repo.
+"""Regenerate trajectory.html for existing tasks in memory_experiments repo.
 
 Downloads task files from GitHub, generates trajectory.html, and uploads it back.
 Supports both parallel (fork_parallel) and baseline configs.
@@ -364,7 +364,7 @@ def get_trials_for_task(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Regenerate trajectory.html for existing tasks in memory_experiments_3"
+        description="Regenerate trajectory.html for existing tasks in memory_experiments"
     )
 
     parser.add_argument("--task-id", help="Task ID to regenerate")
@@ -374,8 +374,8 @@ def main():
 
     parser.add_argument(
         "--github-repo",
-        default="samuellin01/memory_experiments_3",
-        help="GitHub repo (default: samuellin01/memory_experiments_3)",
+        default="samuellin01/memory_experiments",
+        help="GitHub repo (default: samuellin01/memory_experiments)",
     )
     parser.add_argument(
         "--github-path",
