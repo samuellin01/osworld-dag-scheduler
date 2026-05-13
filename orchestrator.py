@@ -743,8 +743,8 @@ class Orchestrator:
         for st in self._all_subtasks.values():
             t = self._threads.get(st.id)
             if t and t.is_alive():
-                logger.warning("%s still running after timeout", st.id)
-                st.status = "failed"
+                logger.warning("%s still running — terminated (orchestrator marked done)", st.id)
+                st.status = "terminated"
 
         if self._orchestrator_done:
             status = "DONE"
