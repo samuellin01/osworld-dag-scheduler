@@ -8,7 +8,7 @@
     {
       "type": "google_sheet_from_template",
       "parameters": {
-        "template_url": "https://huggingface.co/datasets/xlangai/ubuntu_osworld_file_cache/resolve/main/multi_apps/67890eb6-6ce5-4c00-9e3d-fb4972699b06/best_awards_acl.xlsx",
+        "template_url": "https://huggingface.co/datasets/spriggan01/OSWorld/blob/main/best_awards_acl.xlsx",
         "placeholder": "{SHEET_URL}",
         "title": "ACL Best Papers 2019-2022",
         "client_secret_path": "oauth_client_secret.json",
@@ -66,7 +66,7 @@
     },
     "expected": {
       "type": "cloud_file",
-      "path": "https://huggingface.co/datasets/xlangai/ubuntu_osworld_file_cache/resolve/main/multi_apps/67890eb6-6ce5-4c00-9e3d-fb4972699b06/gold_best_awards_acl.xlsx",
+      "path": "https://huggingface.co/datasets/spriggan01/OSWorld/blob/main/gold_best_awards_acl.xlsx",
       "dest": "gold_best_awards_acl.xlsx"
     },
     "options": {
