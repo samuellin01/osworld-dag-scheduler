@@ -625,6 +625,8 @@ class Orchestrator:
             "Orchestrator started: %d initial subtask(s)", len(self._all_subtasks)
         )
 
+        self._work_start_time = time.time()
+
         check_interval = 45
         last_check_time = 0.0
 
@@ -706,11 +708,11 @@ class Orchestrator:
         for thread in list(self._threads.values()):
             thread.join(timeout=5.0)
 
-        # Latency = time until orchestrator said DONE (not straggler cleanup)
+        # Latency = work time only (excludes setup, measures until DONE)
         if self._done_time:
-            duration = self._done_time - self._start_time
+            duration = self._done_time - self._work_start_time
         else:
-            duration = time.time() - self._start_time
+            duration = time.time() - self._work_start_time
 
         for st in self._all_subtasks.values():
             t = self._threads.get(st.id)
@@ -787,6 +789,8 @@ class Orchestrator:
                 )
                 if not executor.execute_config(subtask.setup):
                     logger.warning("%s Setup failed, proceeding anyway", tag)
+                logger.info("%s Letting setup settle (5s)...", tag)
+                time.sleep(5)
 
             agent_output = os.path.join(self.output_dir, subtask.id)
             os.makedirs(agent_output, exist_ok=True)
