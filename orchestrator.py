@@ -595,6 +595,8 @@ class Orchestrator:
         os.makedirs(self._orch_output_dir, exist_ok=True)
         self._orch_history: List[Dict[str, Any]] = []
         self._completed_displays: Dict[str, int] = {}
+        self._orchestrator_done = False
+        self._done_time: Optional[float] = None
 
         for st in subtasks:
             self._all_subtasks[st.id] = st
@@ -688,6 +690,8 @@ class Orchestrator:
                     self._completed_displays.clear()
 
                 if action == "DONE":
+                    self._orchestrator_done = True
+                    self._done_time = time.time()
                     logger.info("[orchestrator] Overall task is DONE")
                     break
 
@@ -695,7 +699,11 @@ class Orchestrator:
         for thread in list(self._threads.values()):
             thread.join(timeout=5.0)
 
-        duration = time.time() - self._start_time
+        # Latency = time until orchestrator said DONE (not straggler cleanup)
+        if self._done_time:
+            duration = self._done_time - self._start_time
+        else:
+            duration = time.time() - self._start_time
 
         for st in self._all_subtasks.values():
             t = self._threads.get(st.id)
@@ -703,10 +711,13 @@ class Orchestrator:
                 logger.warning("%s still running after timeout", st.id)
                 st.status = "failed"
 
-        all_done = all(
-            st.status == "done" for st in self._all_subtasks.values()
-        )
-        status = "DONE" if all_done else "FAIL"
+        if self._orchestrator_done:
+            status = "DONE"
+        else:
+            all_done = all(
+                st.status == "done" for st in self._all_subtasks.values()
+            )
+            status = "DONE" if all_done else "FAIL"
 
         agent_summaries = {}
         for st in self._all_subtasks.values():
