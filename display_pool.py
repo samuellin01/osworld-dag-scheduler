@@ -92,40 +92,19 @@ class DisplayPool:
         """
         logger.info(f"Initializing {self.num_displays} virtual displays...")
 
-        # Install prerequisites (if not already present)
+        # Install prerequisites
         logger.info("Ensuring display prerequisites installed...")
         result = self.vm_exec(
-            "which Xvfb scrot openbox xterm xdotool > /dev/null 2>&1 || "
+            "which Xvfb scrot xdotool > /dev/null 2>&1 || "
             f"(echo '{self.password}' | sudo -S apt-get update -qq && "
-            f"echo '{self.password}' | sudo -S apt-get install -y xvfb scrot openbox xterm xdotool)"
+            f"echo '{self.password}' | sudo -S apt-get install -y xvfb scrot xdotool)"
         )
         if not result or result.get("returncode") != 0:
-            logger.error("Failed to install display prerequisites")
+            logger.error("Failed to install base display prerequisites")
             return False
 
-        # Configure openbox keyboard shortcut for terminal recovery
-        logger.info("Configuring openbox keyboard shortcuts...")
-        openbox_config = """<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <keyboard>
-    <!-- Launch terminal with Ctrl+Alt+T -->
-    <keybind key="C-A-t">
-      <action name="Execute">
-        <command>xterm -fa 'Monospace' -fs 14 -geometry 200x50 -xrm 'XTerm*selectToClipboard: true'</command>
-      </action>
-    </keybind>
-  </keyboard>
-</openbox_config>
-"""
-        config_cmd = (
-            "mkdir -p ~/.config/openbox && "
-            f"cat > ~/.config/openbox/rc.xml << 'OBEOF'\n{openbox_config}\nOBEOF"
-        )
-        result = self.vm_exec(config_cmd)
-        if not result or result.get("returncode") != 0:
-            logger.warning("Failed to configure openbox shortcuts (non-critical)")
-        else:
-            logger.info("✓ Openbox shortcuts configured (Ctrl+Alt+T=xterm)")
+        # Detect best available desktop environment: XFCE > openbox
+        self._desktop = self._detect_desktop()
 
         # Mark primary display :0 as ready (already running, no Xvfb needed)
         if self.include_primary:
@@ -146,31 +125,60 @@ class DisplayPool:
         logger.info(f"Successfully initialized {total} displays ({success_count} virtual + {1 if self.include_primary else 0} primary)")
         return success_count == self.num_displays
 
-    def _start_display(self, display_num: int) -> bool:
-        """Start a single Xvfb display with openbox.
+    def _detect_desktop(self) -> str:
+        """Detect the best available desktop environment on the VM."""
+        result = self.vm_exec("which xfce4-session 2>/dev/null")
+        if result and result.get("returncode") == 0:
+            logger.info("Desktop: XFCE available")
+            return "xfce"
 
-        Args:
-            display_num: Display number (e.g., 2 for :2)
-
-        Returns:
-            bool: True if started successfully
-        """
-        logger.info(f"Starting display :{display_num}...")
-
-        # Start Xvfb + openbox + set background (no taskbar for cleaner display)
-        cmd = (
-            f"export DISPLAY=:{display_num}; "
-            f"nohup Xvfb :{display_num} -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & sleep 2; "
-            f"nohup openbox >/dev/null 2>&1 & sleep 1; "
-            f"xsetroot -solid '#2C3E50' || true; "
+        logger.info("XFCE not found, installing...")
+        result = self.vm_exec(
+            f"echo '{self.password}' | sudo -S apt-get install -y "
+            "xfce4 xfce4-terminal dbus-x11 2>&1 | tail -5"
         )
+        if result and result.get("returncode") == 0:
+            logger.info("Desktop: XFCE installed")
+            return "xfce"
 
-        result = self.vm_exec(cmd)
+        logger.warning("Desktop: falling back to openbox")
+        self.vm_exec(
+            f"echo '{self.password}' | sudo -S apt-get install -y openbox xterm 2>&1 | tail -3"
+        )
+        return "openbox"
+
+    def _start_display(self, display_num: int) -> bool:
+        """Start a single Xvfb display with the detected desktop environment."""
+        desktop = getattr(self, '_desktop', 'openbox')
+        logger.info(f"Starting display :{display_num} ({desktop})...")
+
+        # Start Xvfb at 1280x720 — matches Claude's computer-use calibration
+        xvfb_cmd = (
+            f"nohup Xvfb :{display_num} -screen 0 1280x720x24 -ac >/dev/null 2>&1 & "
+            f"sleep 2"
+        )
+        result = self.vm_exec(xvfb_cmd)
         if not result:
             with self._lock:
                 self.displays[display_num].status = DisplayStatus.ERROR
-                self.displays[display_num].error_msg = "Failed to execute start command"
+                self.displays[display_num].error_msg = "Failed to start Xvfb"
             return False
+
+        # Start desktop session
+        if desktop == "xfce":
+            desktop_cmd = (
+                f"export DISPLAY=:{display_num}; "
+                f"nohup dbus-launch --exit-with-session xfce4-session "
+                f">/dev/null 2>&1 & sleep 3"
+            )
+        else:
+            desktop_cmd = (
+                f"export DISPLAY=:{display_num}; "
+                f"nohup openbox >/dev/null 2>&1 & sleep 1; "
+                f"xsetroot -solid '#2C3E50' || true"
+            )
+
+        self.vm_exec(desktop_cmd)
 
         # Verify display is running
         verify_result = self.vm_exec(f"DISPLAY=:{display_num} xdpyinfo | head -3")
@@ -178,13 +186,13 @@ class DisplayPool:
             with self._lock:
                 self.displays[display_num].status = DisplayStatus.IDLE
                 self.idle_displays.add(display_num)
-            logger.info(f"✓ Display :{display_num} ready")
+            logger.info(f"Display :{display_num} ready ({desktop})")
             return True
         else:
             with self._lock:
                 self.displays[display_num].status = DisplayStatus.ERROR
                 self.displays[display_num].error_msg = "Display verification failed"
-            logger.error(f"✗ Display :{display_num} failed verification")
+            logger.error(f"Display :{display_num} failed verification")
             return False
 
     def allocate(self, agent_id: str) -> Optional[int]:
@@ -244,10 +252,11 @@ class DisplayPool:
         Args:
             display_num: Display number to reset
         """
-        # Close all windows on this display
         cmd = (
             f"export DISPLAY=:{display_num}; "
-            f"wmctrl -l | awk '{{print $1}}' | xargs -I{{}} wmctrl -ic {{}} 2>/dev/null || true"
+            f"wmctrl -l 2>/dev/null | awk '{{print $1}}' | "
+            f"xargs -I{{}} wmctrl -ic {{}} 2>/dev/null || "
+            f"xdotool search --onlyvisible --name '' windowclose 2>/dev/null || true"
         )
         self.vm_exec(cmd)
         logger.debug(f"Reset display :{display_num}")
