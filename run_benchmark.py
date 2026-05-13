@@ -16,7 +16,7 @@ import requests
 
 from bedrock_client import BedrockClient
 from display_pool import DisplayPool
-from orchestrator import Orchestrator, plan_subtasks
+from orchestrator import Orchestrator
 from google_workspace_oauth import (
     create_sheet_from_template_oauth,
     create_doc_from_template_oauth,
@@ -526,40 +526,15 @@ def run_single_task(task_data, args, output_base):
     )
     display_pool.initialize()
 
-    planner_bedrock = BedrockClient(
-        region=args.region, log_dir=output_dir, agent_id="planner"
-    )
-
-    # Take screenshot of display :0 so planner can see what's already set up
+    # Take screenshot of display :0 so orchestrator can see what's already set up
     from xvfb_display import XvfbDisplay
     primary_display = XvfbDisplay(vm_ip, port, 0)
     initial_screenshot = primary_display.screenshot()
-
-    logger.info("Planning subtasks...")
-    subtasks = plan_subtasks(
-        task_description=instruction,
-        bedrock=planner_bedrock,
-        model=args.model,
-        screenshot=initial_screenshot,
-    )
-
-    with open(os.path.join(output_dir, "plan.json"), "w") as f:
-        plan_data = {
-            "task_id": task_id,
-            "instruction": instruction,
-            "subtasks": [
-                {"id": st.id, "task": st.task, "setup": st.setup}
-                for st in subtasks
-            ],
-            "num_agents": len(subtasks),
-        }
-        json.dump(plan_data, f, indent=2)
 
     def bedrock_factory(log_dir: str, agent_id: str) -> BedrockClient:
         return BedrockClient(region=args.region, log_dir=log_dir, agent_id=agent_id)
 
     orchestrator = Orchestrator(
-        subtasks=subtasks,
         display_pool=display_pool,
         vm_exec=vm_exec,
         bedrock_factory=bedrock_factory,
@@ -570,12 +545,12 @@ def run_single_task(task_data, args, output_base):
         task_timeout=1200.0,
         password="osworld-public-evaluation",
         root_task=instruction,
+        initial_screenshot=initial_screenshot,
     )
 
     orchestrator_result = orchestrator.run()
 
     all_bedrock_clients = orchestrator.get_all_bedrock_clients()
-    all_bedrock_clients["planner"] = planner_bedrock
     aggregated_token_usage = aggregate_token_usage(all_bedrock_clients)
 
     result = {
