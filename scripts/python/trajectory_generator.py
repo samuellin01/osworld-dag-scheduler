@@ -470,6 +470,29 @@ def generate_trajectory_html(
             except (ValueError, OSError):
                 pass
 
+    # Infer orchestrator start time from execution_log.json so the initial
+    # planning phase is visible in the timeline.  execution_log events are
+    # timestamped relative to _start_time.  If the first "launch" event is
+    # at e.g. 18s, the orchestrator spent 18s planning.  We shift
+    # first_timestamp back by that amount so agent steps start at ~18s
+    # instead of 0s.
+    orch_offset = 0.0
+    exec_log_path_for_offset = local_path / "_orchestrator" / "execution_log.json"
+    if exec_log_path_for_offset.is_file() and first_timestamp is not None:
+        try:
+            with open(exec_log_path_for_offset, 'r', encoding='utf-8') as f:
+                _exec_events = json.load(f)
+            first_launch_time = None
+            for evt in _exec_events:
+                if evt.get('event') in ('launch', 'assign'):
+                    first_launch_time = evt.get('time', 0)
+                    break
+            if first_launch_time and first_launch_time > 0:
+                orch_offset = first_launch_time
+                first_timestamp = first_timestamp - orch_offset
+        except (json.JSONDecodeError, OSError):
+            pass
+
     agent_data = []
     for agent_id, agent_dir in agent_dirs:
         # Collect step files from flat layout (fork_parallel) or phase subdirs (orchestrator)
@@ -656,7 +679,8 @@ def generate_trajectory_html(
     h.append("<meta charset='utf-8'>")
     h.append(f"<title>Trajectory — {esc(task_id)}</title>")
     # Calculate timeline height based on number of agents
-    timeline_height = 40 + max(0, (total_agents - 1)) * 24
+    has_orch_bar = orch_offset > 0
+    timeline_height = 40 + max(0, (total_agents - 1)) * 24 + (24 if has_orch_bar else 0)
 
     h.append("<style>")
     h.append(f"""
@@ -755,6 +779,13 @@ h2 {{
 }}
 .agent-status-failed::after {{
     content: ' ✗';
+}}
+.agent-status-terminated {{
+    background: rgba(139, 148, 158, 0.15);
+    color: #8b949e;
+}}
+.agent-status-terminated::after {{
+    content: ' ⏹';
 }}
 .agent-status-running {{
     background: rgba(88, 166, 255, 0.15);
@@ -930,6 +961,11 @@ h2 {{
 .timeline-bar.agent-child {{
     background: linear-gradient(90deg, #8b949e 0%, #6e7681 100%);
     box-shadow: 0 2px 8px rgba(139, 148, 158, 0.3);
+}}
+.timeline-bar.agent-orchestrator {{
+    background: repeating-linear-gradient(90deg, #484f58 0px, #484f58 6px, #30363d 6px, #30363d 12px);
+    box-shadow: 0 2px 8px rgba(72, 79, 88, 0.3);
+    opacity: 0.7;
 }}
 .timeline-bar-label {{
     position: absolute;
@@ -1264,6 +1300,15 @@ h2 {{
     h.append("    </div>")
     h.append("    <div class='timeline-bars' id='timeline-bars'>")
 
+    # Orchestrator planning bar (visible initial thinking time)
+    orch_bar_offset = 0
+    if has_orch_bar:
+        orch_pct = (orch_offset / total_duration * 100) if total_duration > 0 else 0
+        h.append(f"    <div class='timeline-bar agent-orchestrator' style='left: 0%; width: {orch_pct:.1f}%; top: 0px' title='Orchestrator planning ({fmt_duration(orch_offset)})'>")
+        h.append(f"      <div class='timeline-bar-label'>orchestrator planning</div>")
+        h.append("    </div>")
+        orch_bar_offset = 24
+
     # Timeline bars for each agent
     for idx, agent in enumerate(agent_data):
         agent_id = agent['id']
@@ -1284,11 +1329,11 @@ h2 {{
         else:
             bar_class = f'agent-child-{idx % 7}'
 
-        top_offset = idx * 24
+        top_offset = orch_bar_offset + idx * 24
 
         # Status icon
         status = agent.get('status', 'unknown')
-        status_icon = {'completed': '✓', 'killed': '⚠', 'failed': '✗', 'running': '⟳'}.get(status, '')
+        status_icon = {'completed': '✓', 'killed': '⚠', 'failed': '✗', 'terminated': '⏹', 'running': '⟳'}.get(status, '')
 
         # Build label with step count and status
         step_count = len(agent.get('steps', []))
