@@ -79,7 +79,7 @@ python run_baseline_task.py \
 
 ### Run Single Task (Fork-Parallel)
 ```bash
-python run_benchmark.py \
+python run_orchestrator.py \
   --task-id 030eeff7-collaborative \
   --provider-name aws \
   --region us-east-1 \
@@ -184,7 +184,7 @@ Both configurations track:
 ```
 osworld-dag-scheduler/
 ├── run_baseline_task.py              # Single-agent task runner
-├── run_benchmark.py                  # Fork-parallel task runner
+├── run_orchestrator.py                # Orchestrator multi-agent task runner
 ├── fork_agent.py                     # Fork-parallel agent implementation
 ├── agent_runtime.py                  # Agent process management
 ├── bedrock_client.py                 # AWS Bedrock API client
