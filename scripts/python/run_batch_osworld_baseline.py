@@ -423,10 +423,10 @@ def find_next_trial_slots(existing_trials: list[int], num_new_trials: int) -> li
 
 def discover_task_ids_from_test_file(task_type: str, test_file: str | None) -> list[str]:
     """Discover all task IDs from test JSON files."""
-    # Import from run_benchmark.py
+    # Import from run_orchestrator.py
     repo_root = pathlib.Path(__file__).parent.parent.parent
     sys.path.insert(0, str(repo_root))
-    from run_benchmark import load_osworld_tasks
+    from run_orchestrator import load_osworld_tasks
 
     tasks = load_osworld_tasks(task_type=task_type, test_file=test_file)
     task_ids = [t.get("id") for t in tasks if t.get("id")]
