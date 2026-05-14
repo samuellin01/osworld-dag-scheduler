@@ -1,5 +1,5 @@
 """Batch evaluation script for running the fork-based parallel CUA agent
-(run_benchmark.py) across all tasks in a domain and uploading results to GitHub.
+(run_orchestrator.py) across all tasks in a domain and uploading results to GitHub.
 
 Example usage:
 
@@ -382,10 +382,10 @@ def find_next_trial_slots(existing_trials: list[int], num_new_trials: int) -> li
 
 def discover_task_ids_from_test_file(task_type: str, test_file: str | None) -> list[str]:
     """Discover all task IDs from test JSON files."""
-    # Import from run_benchmark.py
+    # Import from run_orchestrator.py
     repo_root = pathlib.Path(__file__).parent.parent.parent
     sys.path.insert(0, str(repo_root))
-    from run_benchmark import load_osworld_tasks
+    from run_orchestrator import load_osworld_tasks
 
     tasks = load_osworld_tasks(task_type=task_type, test_file=test_file)
     task_ids = [t.get("id") for t in tasks if t.get("id")]
@@ -397,11 +397,11 @@ _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__fil
 
 
 def build_run_cmd(task_id: str, trial_base_dir: str, args: argparse.Namespace) -> list:
-    """Build the subprocess command to run a single task via run_benchmark.py.
+    """Build the subprocess command to run a single task via run_orchestrator.py.
 
-    Note: run_benchmark.py will create a task_{task_id} subdirectory inside trial_base_dir.
+    Note: run_orchestrator.py will create a task_{task_id} subdirectory inside trial_base_dir.
     """
-    run_script_path = os.path.join(_REPO_ROOT, "run_benchmark.py")
+    run_script_path = os.path.join(_REPO_ROOT, "run_orchestrator.py")
     cmd = [
         sys.executable,
         run_script_path,
@@ -873,7 +873,7 @@ def main() -> None:
             # Filter by domain if needed
             # For now, just log a warning that domain filtering after discovery isn't implemented yet
             logger.warning("Domain filtering via --domain not yet implemented for task discovery. "
-                          "Use run_benchmark.py's --domain flag directly or filter task_ids manually.")
+                          "Use run_orchestrator.py's --domain flag directly or filter task_ids manually.")
 
     if not task_ids:
         logger.error("No task IDs to process. Exiting.")
@@ -940,7 +940,7 @@ def main() -> None:
                     last_credential_refresh = time.monotonic()
 
             # Build output directory for this trial
-            # run_benchmark.py creates a "task_{task_id}" subdirectory, so pass the parent
+            # run_orchestrator.py creates a "task_{task_id}" subdirectory, so pass the parent
             trial_base_dir = os.path.join(os.path.abspath(args.result_dir), f"trial_{trial_idx}")
             os.makedirs(trial_base_dir, exist_ok=True)
 
@@ -953,7 +953,7 @@ def main() -> None:
                 else:
                     logger.info("[dry-run] Would clear cache for task %s", task_id)
 
-            # Build and run the command (run_benchmark will create task_{task_id} subdir)
+            # Build and run the command (run_orchestrator will create task_{task_id} subdir)
             run_cmd = build_run_cmd(task_id, trial_base_dir, args)
             run_ok = run_subprocess(
                 run_cmd,
