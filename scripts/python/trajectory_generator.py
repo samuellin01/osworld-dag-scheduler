@@ -474,7 +474,7 @@ def generate_trajectory_html(
     # 1. Shift first_timestamp so agent steps are relative to orchestrator start
     # 2. Compute orchestrator "thinking" intervals for timeline bars
     orch_offset = 0.0
-    orch_thinking_intervals: List[Tuple[float, float, str]] = []  # (start, end, label)
+    orch_thinking_intervals: List[Tuple[float, float, str]] = []
     exec_log_path_for_offset = local_path / "_orchestrator" / "execution_log.json"
     if exec_log_path_for_offset.is_file() and first_timestamp is not None:
         try:
@@ -761,8 +761,7 @@ def generate_trajectory_html(
     h.append("<meta charset='utf-8'>")
     h.append(f"<title>Trajectory — {esc(task_id)}</title>")
     # Calculate timeline height based on number of agents
-    has_orch_bars = len(orch_thinking_intervals) > 0
-    timeline_height = 40 + max(0, (total_agents - 1)) * 24 + (24 if has_orch_bars else 0)
+    timeline_height = 40 + max(0, (total_agents - 1)) * 24
 
     h.append("<style>")
     h.append(f"""
@@ -1043,11 +1042,6 @@ h2 {{
 .timeline-bar.agent-child {{
     background: linear-gradient(90deg, #8b949e 0%, #6e7681 100%);
     box-shadow: 0 2px 8px rgba(139, 148, 158, 0.3);
-}}
-.timeline-bar.agent-orchestrator {{
-    background: repeating-linear-gradient(90deg, #484f58 0px, #484f58 6px, #30363d 6px, #30363d 12px);
-    box-shadow: 0 2px 8px rgba(72, 79, 88, 0.3);
-    opacity: 0.7;
 }}
 .timeline-bar-label {{
     position: absolute;
@@ -1476,20 +1470,6 @@ h2 {{
     h.append("    </div>")
     h.append("    <div class='timeline-bars' id='timeline-bars'>")
 
-    # Orchestrator thinking bars (derived from execution_log gaps)
-    orch_bar_offset = 0
-    if has_orch_bars:
-        for iv_start, iv_end, iv_label in orch_thinking_intervals:
-            left_pct = (iv_start / total_duration * 100) if total_duration > 0 else 0
-            width_pct = ((iv_end - iv_start) / total_duration * 100) if total_duration > 0 else 0
-            if width_pct < 0.5:
-                continue
-            iv_dur = fmt_duration(iv_end - iv_start)
-            h.append(f"    <div class='timeline-bar agent-orchestrator' style='left: {left_pct:.1f}%; width: {width_pct:.1f}%; top: 0px' title='Orchestrator {iv_label} ({iv_dur})'>")
-            h.append(f"      <div class='timeline-bar-label'>{iv_label}</div>")
-            h.append("    </div>")
-        orch_bar_offset = 24
-
     # Timeline bars for each agent
     for idx, agent in enumerate(agent_data):
         agent_id = agent['id']
@@ -1510,7 +1490,7 @@ h2 {{
         else:
             bar_class = f'agent-child-{idx % 7}'
 
-        top_offset = orch_bar_offset + idx * 24
+        top_offset = idx * 24
 
         # Status icon
         status = agent.get('status', 'unknown')
