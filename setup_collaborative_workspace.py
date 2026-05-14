@@ -108,7 +108,7 @@ def main():
             logger.info(f"URLs saved in: {args.output_file}")
             logger.info(f"\nTo recreate all files, use: --force")
             logger.info(f"\nYou can now run collaborative tasks:")
-            logger.info(f"  python run_benchmark.py --task-type collaborative --num-tasks 10 ...")
+            logger.info(f"  python run_orchestrator.py --task-type collaborative --num-tasks 10 ...")
             return
         logger.info(f"Will create {len(active_tasks) - len(workspace_urls)} missing files")
     elif args.force:
@@ -223,7 +223,7 @@ def main():
         logger.info(f"  Skipped (already exist): {skipped_count}")
     logger.info(f"URLs saved to: {args.output_file}")
     logger.info(f"\nYou can now run collaborative tasks infinitely:")
-    logger.info(f"  python run_benchmark.py --task-type collaborative --num-tasks 10 ...")
+    logger.info(f"  python run_orchestrator.py --task-type collaborative --num-tasks 10 ...")
 
 
 if __name__ == "__main__":
