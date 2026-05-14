@@ -81,7 +81,8 @@ Output a JSON object:
 
 **Guidelines**:
 - Google Workspace: multiple agents CAN open the same Doc/Sheet/Slides URL \
-on different displays and edit collaboratively in real-time.
+on different displays and edit collaboratively in real-time. \
+Subagents should not be instructed to use Apps Script instead of the UI.
 - Don't over-split: if a single agent can handle everything in ~30 actions, \
 return a single subtask.
 - Each subtask must be self-contained with all info the agent needs.
