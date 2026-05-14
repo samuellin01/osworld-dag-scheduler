@@ -82,7 +82,7 @@ Output a JSON object:
 **Guidelines**:
 - Google Workspace: multiple agents CAN open the same Doc/Sheet/Slides URL \
 on different displays and edit collaboratively in real-time. \
-Subagents should not be instructed to use Apps Script instead of the UI.
+Subagents MUST not be instructed to use Apps Script (use UI instead).
 - Don't over-split: if a single agent can handle everything in ~30 actions, \
 return a single subtask.
 - Each subtask must be self-contained with all info the agent needs.
@@ -121,7 +121,8 @@ agent to narrow its scope, then ASSIGN the split-off piece to a new agent. \
 This reduces wall-clock time by running independent work concurrently.
 
 Existing template content in documents and spreadsheets should not be modified, \
-reformatted, or deleted — it will be exact-matched during evaluation."""
+reformatted, or deleted — it will be exact-matched during evaluation. \
+You must not instruct agents to use Apps Script."""
 
 
 _ORCHESTRATOR_TOOLS = [
