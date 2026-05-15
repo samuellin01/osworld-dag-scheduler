@@ -22,17 +22,30 @@ User Task → Single Agent → Sequential Actions → Result
 - Completes task step-by-step
 - Reference implementation for comparison
 
-### Fork-Parallel (Multi-Agent)
+### Orchestrator (Multi-Agent)
 ```
-User Task → Parent Agent → Fork Child Agents → Parallel Execution → Merge Results
-                ├─ Child Agent 1 (subtask A)
-                ├─ Child Agent 2 (subtask B)
-                └─ Child Agent 3 (subtask C)
+User Task → Orchestrator → Assign Subtasks → Parallel Execution → Merge Results
+                ├─ Agent 1 (subtask A)
+                ├─ Agent 2 (subtask B)
+                └─ Agent 3 (subtask C)
 ```
-- Parent agent analyzes task and decides when to fork
-- Child agents work on independent subtasks concurrently
-- Parent merges results and completes task
-- Designed for tasks with parallelizable subtasks
+- Orchestrator LLM decomposes task into subtasks
+- Agents work on independent subtasks concurrently on separate displays
+- Orchestrator monitors, messages, and coordinates agents
+- Coarse-grained task-level parallelism
+
+### Resource-Aware Scheduler (Multi-Agent)
+```
+User Task → Planner → DAG with Resource Footprints → Scheduler → Parallel Dispatch
+                ├─ Node 1: WRITE cells[A1:A5] → Display :2
+                ├─ Node 2: WRITE cells[B1:B5] → Display :3  (no conflict → parallel)
+                └─ Node 3: WRITE cells[A6:A10] → Display :4 (no conflict → parallel)
+```
+- Plans a DAG of actions with explicit resource footprints (cell ranges, file paths, etc.)
+- Fine-grained conflict detection: two actions conflict only if their WRITE paths overlap
+- DAG refines during execution as new information is discovered
+- Scheduler works continuously (speculative refinement during agent execution)
+- Agents can pre-position (navigate to target) while waiting for data dependencies
 
 ## Installation
 
@@ -77,16 +90,27 @@ python run_baseline_task.py \
   --output-dir ./results/baseline
 ```
 
-### Run Single Task (Fork-Parallel)
+### Run Single Task (Orchestrator)
 ```bash
 python run_orchestrator.py \
   --task-id 030eeff7-collaborative \
   --provider-name aws \
   --region us-east-1 \
   --headless \
-  --max-steps 300 \
   --model claude-opus-4-6 \
-  --output-dir ./results/fork_parallel
+  --output-dir ./results/orchestrator
+```
+
+### Run Single Task (Resource-Aware Scheduler)
+```bash
+python run_scheduler.py \
+  --task-name 030eeff7-collaborative \
+  --task-type collaborative \
+  --provider-name aws \
+  --region us-east-1 \
+  --headless \
+  --model claude-opus-4-6 \
+  --output-dir ./results/scheduler
 ```
 
 ### Run Batch Evaluation
@@ -170,28 +194,32 @@ python scripts/python/regenerate_trajectory.py \
 
 ## Research Metrics
 
-Both configurations track:
+All three configurations track:
 - **Latency**: Agent execution time (excludes evaluation overhead)
 - **Cost**: Total API usage cost (input/output/cache tokens)
 - **Success Rate**: Task completion accuracy
 - **Steps**: Number of actions taken
 - **Token Usage**: Detailed breakdown of cache hits/writes
 
-**Key Research Question:** Does fork-parallel execution reduce latency for tasks with parallelizable subtasks?
+**Key Research Questions:**
+- Does multi-agent execution reduce latency for tasks with parallelizable subtasks?
+- Does fine-grained resource-aware scheduling unlock more parallelism than coarse task decomposition?
 
 ## Project Structure
 
 ```
 osworld-dag-scheduler/
 ├── run_baseline_task.py              # Single-agent task runner
-├── run_orchestrator.py                # Orchestrator multi-agent task runner
-├── fork_agent.py                     # Fork-parallel agent implementation
-├── agent_runtime.py                  # Agent process management
+├── run_orchestrator.py               # Orchestrator multi-agent task runner
+├── run_scheduler.py                  # Resource-aware DAG scheduler runner
+├── orchestrator.py                   # Orchestrator (coarse task decomposition)
+├── scheduler.py                      # DAG scheduler (fine-grained resource conflicts)
+├── resource_model.py                 # Resource tree, paths, conflict detection
 ├── bedrock_client.py                 # AWS Bedrock API client
 ├── google_workspace_oauth.py         # Google Workspace integration
 ├── scripts/python/
 │   ├── run_batch_osworld_baseline.py # Baseline batch evaluation
-│   ├── run_batch_fork_parallel.py    # Fork-parallel batch evaluation
+│   ├── run_batch_fork_parallel.py    # Orchestrator batch evaluation
 │   ├── trajectory_generator.py       # Fork-parallel HTML generator
 │   ├── trajectory_generator_baseline.py # Baseline HTML generator
 │   └── regenerate_trajectory.py      # Trajectory regeneration tool
