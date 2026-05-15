@@ -470,21 +470,24 @@ def generate_trajectory_html(
             except (ValueError, OSError):
                 pass
 
-    # Parse execution_log.json for orchestrator timing:
-    # 1. Shift first_timestamp so agent steps are relative to orchestrator start
+    # Parse execution_log.json for orchestrator/scheduler timing:
+    # 1. Shift first_timestamp so agent steps are relative to run start
     # 2. Compute orchestrator "thinking" intervals for timeline bars
     orch_offset = 0.0
     orch_thinking_intervals: List[Tuple[float, float, str]] = []
+    # Check both orchestrator and scheduler execution logs
     exec_log_path_for_offset = local_path / "_orchestrator" / "execution_log.json"
+    if not exec_log_path_for_offset.is_file():
+        exec_log_path_for_offset = local_path / "_scheduler" / "execution_log.json"
     if exec_log_path_for_offset.is_file() and first_timestamp is not None:
         try:
             with open(exec_log_path_for_offset, 'r', encoding='utf-8') as f:
                 _exec_events = json.load(f)
 
-            # Find first launch to compute offset
+            # Find first agent launch/dispatch to compute planning offset
             first_launch_time = None
             for evt in _exec_events:
-                if evt.get('event') in ('launch', 'assign'):
+                if evt.get('event') in ('launch', 'assign', 'dispatch'):
                     first_launch_time = evt.get('time', 0)
                     break
             if first_launch_time and first_launch_time > 0:
@@ -500,7 +503,7 @@ def generate_trajectory_html(
             for evt in _exec_events:
                 t = evt.get('time', 0)
                 etype = evt.get('event', '')
-                if etype in ('launch', 'assign'):
+                if etype in ('launch', 'assign', 'dispatch'):
                     if t - last_idle_start >= 3:
                         label = 'planning' if last_idle_start == 0 else 'deciding'
                         orch_thinking_intervals.append((last_idle_start, t, label))
@@ -598,11 +601,11 @@ def generate_trajectory_html(
             'steps': steps,
         })
 
-    # Use the larger of result.json duration and agent-derived duration
-    # result.json includes orchestrator's final decision time after last agent step
+    # Prefer agent-derived duration over result.json duration.
+    # result.json may include event-loop tail time that extends past last agent step.
     if agent_data:
         agent_derived = max(agent['end'] for agent in agent_data)
-        total_duration = max(total_duration, agent_derived)
+        total_duration = agent_derived  # Use agent-derived, not the larger result.json value
 
     # -- Build action log from step files (not API calls) -------------------
 
@@ -675,6 +678,99 @@ def generate_trajectory_html(
                         'action': 'Task marked as DONE',
                         'type': 'report',
                     })
+        except (json.JSONDecodeError, OSError) as e:
+            pass
+
+    # -- Inject scheduler events from execution_log.json --------------------
+
+    scheduler_events: List[Dict] = []
+    exec_log_path = local_path / "_scheduler" / "execution_log.json"
+    if exec_log_path.is_file():
+        try:
+            with open(exec_log_path, 'r', encoding='utf-8') as f:
+                exec_events = json.load(f)
+            for evt in exec_events:
+                evt_type = evt.get('event', '')
+                evt_time = evt.get('time', 0)
+
+                if evt_type == 'dispatch':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"Dispatched '{evt.get('node_id', '')}' to display {evt.get('display', '?')}",
+                        'type': 'fork',
+                    })
+                elif evt_type == 'complete':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': evt.get('node_id', 'scheduler'),
+                        'step': '',
+                        'action': f"{evt.get('node_id', '')} completed ({evt.get('status', '?')}, {evt.get('steps', '?')} steps)",
+                        'type': 'report',
+                    })
+                elif evt_type == 'orchestrate_message':
+                    msg_preview = evt.get('message', '')[:200]
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"→ {evt.get('node_id', '')}: {msg_preview}",
+                        'type': 'message',
+                    })
+                elif evt_type == 'orchestrate_create':
+                    task_preview = evt.get('task', '')[:150]
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"Created node '{evt.get('node_id', '')}': {task_preview}",
+                        'type': 'fork',
+                    })
+                elif evt_type == 'orchestrate_update_fp':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"Updated footprint: {evt.get('node_id', '')} {evt.get('old_footprint', '')} → {evt.get('new_footprint', '')}",
+                        'type': 'orch',
+                    })
+                elif evt_type == 'orchestrate_cancel':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"Cancelled node {evt.get('node_id', '')}",
+                        'type': 'report',
+                    })
+                elif evt_type == 'orchestrate_remove_dep':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"Removed dependency: {evt.get('removed_dep', '')} no longer blocks {evt.get('node_id', '')}",
+                        'type': 'orch',
+                    })
+                elif evt_type == 'prune_dep':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': f"[algorithmic] Pruned dependency: {evt.get('removed_dep', '')} → {evt.get('node_id', '')}",
+                        'type': 'orch',
+                    })
+                elif evt_type == 'done':
+                    all_actions.append({
+                        'timestamp': evt_time,
+                        'agent': 'scheduler',
+                        'step': '',
+                        'action': 'All nodes complete',
+                        'type': 'report',
+                    })
+
+                # Collect scheduler events for the scheduler tab
+                if evt_type in ('dispatch', 'complete', 'done', 'prune_dep') or evt_type.startswith('orchestrate_'):
+                    scheduler_events.append(evt)
         except (json.JSONDecodeError, OSError) as e:
             pass
 
@@ -761,7 +857,8 @@ def generate_trajectory_html(
     h.append("<meta charset='utf-8'>")
     h.append(f"<title>Trajectory — {esc(task_id)}</title>")
     # Calculate timeline height based on number of agents
-    timeline_height = 40 + max(0, (total_agents - 1)) * 24
+    extra_rows = 1 if orch_thinking_intervals else 0
+    timeline_height = 40 + max(0, (total_agents - 1 + extra_rows)) * 24
 
     h.append("<style>")
     h.append(f"""
@@ -1235,6 +1332,18 @@ h2 {{
     background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, rgba(63, 185, 80, 0.05) 100%);
     border-left: 3px solid #3fb950;
 }}
+.action-item.orch {{
+    background: linear-gradient(90deg, rgba(63, 185, 130, 0.08) 0%, rgba(63, 185, 130, 0.02) 100%);
+    border-left: 3px solid #3fb982;
+}}
+.action-item.orch:hover {{
+    background: linear-gradient(90deg, rgba(63, 185, 130, 0.15) 0%, rgba(63, 185, 130, 0.05) 100%);
+    border-left: 3px solid #3fb982;
+}}
+.action-item.orch .action-detail::before {{
+    content: '\U0001F4D0 ';
+    color: #3fb982;
+}}
 
 .action-time {{
     color: #8b949e;
@@ -1332,6 +1441,7 @@ h2 {{
 }}
 .comm-legend-item.fork .comm-legend-label {{ color: #a371f7; }}
 .comm-legend-item.message .comm-legend-label {{ color: #f7d058; }}
+.comm-legend-item.orch .comm-legend-label {{ color: #3fb982; }}
 .comm-legend-item.peek .comm-legend-label {{ color: #58a6ff; }}
 .comm-legend-item.report .comm-legend-label {{ color: #3fb950; }}
 
@@ -1385,6 +1495,22 @@ h2 {{
 .orch-badge-done {{
     background: rgba(63, 185, 80, 0.15);
     color: #3fb950;
+}}
+.orch-badge-dispatch {{
+    background: rgba(163, 113, 247, 0.15);
+    color: #a371f7;
+}}
+.orch-badge-orchestrate {{
+    background: rgba(63, 185, 130, 0.15);
+    color: #3fb982;
+}}
+.orch-badge-complete {{
+    background: rgba(63, 185, 80, 0.15);
+    color: #3fb950;
+}}
+.orch-badge-prune {{
+    background: rgba(88, 166, 255, 0.15);
+    color: #58a6ff;
 }}
 .orch-trigger {{
     font-size: 0.75em;
@@ -1441,7 +1567,7 @@ h2 {{
     score_class = "score-pass" if score_str not in ["N/A", "0", "0.0"] else "score-fail"
     h.append("<div class='meta'>")
     h.append(f"  <span>Score: <strong class='{score_class}'>{esc(score_str)}</strong></span>")
-    h.append(f"  <span>Duration: <strong>{fmt_duration(duration)}</strong></span>")
+    h.append(f"  <span>Duration: <strong>{fmt_duration(total_duration)}</strong></span>")
     h.append(f"  <span>Agents: <strong>{num_agents}</strong> {'(parallelized)' if forked else ''}</span>")
     h.append(f"  <span>Cost: <strong class='cost-highlight'>${cost:.2f}</strong></span>")
     h.append("</div>")
@@ -1509,6 +1635,20 @@ h2 {{
         h.append(f"      <div class='timeline-bar-label'>{esc(label)}</div>")
         h.append("    </div>")
 
+    # Add orchestrator/scheduler thinking intervals (planning, deciding, finalizing)
+    if orch_thinking_intervals:
+        orch_top = len(agent_data) * 24
+        for interval_start, interval_end, label in orch_thinking_intervals:
+            s_pct = (interval_start / total_duration * 100) if total_duration > 0 else 0
+            w_pct = ((interval_end - interval_start) / total_duration * 100) if total_duration > 0 else 0
+            w_pct = max(w_pct, 1.5)
+            tooltip = f"scheduler {label}: {fmt_duration(interval_start)} → {fmt_duration(interval_end)}"
+            h.append(f"    <div class='timeline-bar' style='left: {s_pct:.1f}%; width: {w_pct:.1f}%; top: {orch_top}px; "
+                     f"background: linear-gradient(90deg, #8b949e 0%, #6e7681 100%); "
+                     f"box-shadow: 0 2px 8px rgba(139, 148, 158, 0.3); opacity: 0.8' title='{esc(tooltip)}'>")
+            h.append(f"      <div class='timeline-bar-label'>{esc(label)}</div>")
+            h.append("    </div>")
+
     # Add coordination event markers on timeline
     for decision in all_manager_decisions:
         if decision['type'] == 'CONTINUE':
@@ -1575,6 +1715,8 @@ h2 {{
     h.append("  <div class='tab active' onclick='showTab(\"log\")'>📋 Action Log</div>")
     if orch_decisions:
         h.append("  <div class='tab' onclick='showTab(\"orchestrator\")'>🧠 Orchestrator</div>")
+    if scheduler_events:
+        h.append("  <div class='tab' onclick='showTab(\"scheduler\")'>🎯 Scheduler</div>")
     if all_manager_decisions:
         h.append("  <div class='tab' onclick='showTab(\"managers\")'>🧠 Manager Decisions</div>")
     h.append("</div>")
@@ -1586,15 +1728,19 @@ h2 {{
     h.append("  <div class='comm-legend'>")
     h.append("    <div class='comm-legend-item fork'>")
     h.append("      <span class='comm-legend-icon'>🔀</span>")
-    h.append("      <span class='comm-legend-label'>Helper Spawned</span>")
+    h.append("      <span class='comm-legend-label'>Node Dispatched</span>")
     h.append("    </div>")
     h.append("    <div class='comm-legend-item message'>")
-    h.append("      <span class='comm-legend-icon'>📋</span>")
-    h.append("      <span class='comm-legend-label'>Scope Update</span>")
+    h.append("      <span class='comm-legend-icon'>💬</span>")
+    h.append("      <span class='comm-legend-label'>Orchestrator Message</span>")
+    h.append("    </div>")
+    h.append("    <div class='comm-legend-item orch'>")
+    h.append("      <span class='comm-legend-icon'>📐</span>")
+    h.append("      <span class='comm-legend-label'>Footprint / Dependency</span>")
     h.append("    </div>")
     h.append("    <div class='comm-legend-item report'>")
     h.append("      <span class='comm-legend-icon'>✅</span>")
-    h.append("      <span class='comm-legend-label'>Subtask Complete</span>")
+    h.append("      <span class='comm-legend-label'>Completed</span>")
     h.append("    </div>")
     h.append("  </div>")
 
@@ -1644,6 +1790,92 @@ h2 {{
             response_text = dec['response']
             if response_text:
                 h.append(f"    <div class='orch-decision-response'>{esc(response_text)}</div>")
+
+            h.append(f"  </div>")
+
+        h.append("</div>")
+
+    # Scheduler tab (DAG evolution visualization)
+    if scheduler_events:
+        h.append("<div id='tab-scheduler' class='tab-content'>")
+
+        for evt in scheduler_events:
+            evt_type = evt.get('event', '')
+            evt_time = evt.get('time', 0)
+            time_str = fmt_duration(evt_time)
+            dag_str = evt.get('dag', '')
+
+            # Determine badge class based on event type
+            if evt_type == 'dispatch':
+                badge_class = 'orch-badge-dispatch'
+                badge_label = 'dispatch'
+            elif evt_type == 'complete':
+                badge_class = 'orch-badge-complete'
+                badge_label = 'complete'
+            elif evt_type == 'done':
+                badge_class = 'orch-badge-done'
+                badge_label = 'done'
+            elif evt_type == 'prune_dep':
+                badge_class = 'orch-badge-prune'
+                badge_label = 'prune_dep'
+            else:
+                badge_class = 'orch-badge-orchestrate'
+                badge_label = evt_type
+
+            h.append(f"  <div class='orch-decision'>")
+            h.append(f"    <div class='orch-decision-header'>")
+            h.append(f"      <div class='orch-decision-meta'>")
+            h.append(f"        <span class='action-time'>{esc(time_str)}</span>")
+            h.append(f"        <span class='orch-badge {badge_class}'>{esc(badge_label)}</span>")
+            h.append(f"      </div>")
+            h.append(f"    </div>")
+
+            # Build detail text based on event type
+            detail_parts: List[str] = []
+            if evt_type == 'dispatch':
+                detail_parts.append(f"Dispatched <strong>{esc(evt.get('node_id', ''))}</strong> to display {esc(str(evt.get('display', '?')))}")
+                task_preview = evt.get('task', '')[:200]
+                if task_preview:
+                    detail_parts.append(f"<br><small style='color:#8b949e'>Task: {esc(task_preview)}</small>")
+                fp = evt.get('footprint', '')
+                if fp:
+                    detail_parts.append(f"<br><small style='color:#a371f7'>Footprint: {esc(str(fp))}</small>")
+            elif evt_type == 'complete':
+                detail_parts.append(f"<strong>{esc(evt.get('node_id', ''))}</strong> completed ({esc(evt.get('status', '?'))}, {evt.get('steps', '?')} steps)")
+                summary = evt.get('summary', '')[:200]
+                if summary:
+                    detail_parts.append(f"<br><small style='color:#8b949e'>{esc(summary)}</small>")
+            elif evt_type == 'orchestrate_message':
+                detail_parts.append(f"Message to <strong>{esc(evt.get('node_id', ''))}</strong>")
+                msg = evt.get('message', '')[:300]
+                if msg:
+                    detail_parts.append(f"<br><small style='color:#f7d058'>{esc(msg)}</small>")
+            elif evt_type == 'orchestrate_create':
+                detail_parts.append(f"Created node <strong>{esc(evt.get('node_id', ''))}</strong>")
+                task_preview = evt.get('task', '')[:200]
+                if task_preview:
+                    detail_parts.append(f"<br><small style='color:#8b949e'>Task: {esc(task_preview)}</small>")
+                fp = evt.get('footprint', '')
+                if fp:
+                    detail_parts.append(f"<br><small style='color:#a371f7'>Footprint: {esc(str(fp))}</small>")
+            elif evt_type == 'orchestrate_update_fp':
+                detail_parts.append(f"Updated footprint for <strong>{esc(evt.get('node_id', ''))}</strong>")
+                detail_parts.append(f"<br><small style='color:#8b949e'>{esc(evt.get('old_footprint', ''))} → {esc(evt.get('new_footprint', ''))}</small>")
+            elif evt_type == 'orchestrate_cancel':
+                detail_parts.append(f"Cancelled node <strong>{esc(evt.get('node_id', ''))}</strong>")
+            elif evt_type == 'orchestrate_remove_dep':
+                detail_parts.append(f"Removed dependency: <strong>{esc(evt.get('removed_dep', ''))}</strong> no longer blocks <strong>{esc(evt.get('node_id', ''))}</strong>")
+            elif evt_type == 'prune_dep':
+                detail_parts.append(f"[algorithmic] Pruned dependency: <strong>{esc(evt.get('removed_dep', ''))}</strong> → <strong>{esc(evt.get('node_id', ''))}</strong>")
+            elif evt_type == 'done':
+                detail_parts.append("All nodes complete")
+
+            if detail_parts:
+                h.append(f"    <div class='orch-decision-action'>{''.join(detail_parts)}</div>")
+
+            # Show DAG snapshot as monospaced status line
+            if dag_str:
+                h.append(f"    <div class='orch-decision-context'>{esc(dag_str)}</div>")
 
             h.append(f"  </div>")
 
