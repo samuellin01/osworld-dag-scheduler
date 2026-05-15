@@ -577,6 +577,9 @@ class Scheduler:
         with self._lock:
             ready = []
             for node in self._dag.values():
+                if node.status == NodeStatus.READY:
+                    ready.append(node)
+                    continue
                 if node.status != NodeStatus.PLANNED:
                     continue
                 deps_met = all(
