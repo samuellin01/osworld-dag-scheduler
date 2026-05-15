@@ -2,7 +2,7 @@
   "id": "67890eb6-collaborative",
   "osworld_original": "67890eb6-6ce5-4c00-9e3d-fb4972699b06",
   "snapshot": "google_sheets",
-  "instruction": "I am an NLP researcher. Check out the best long paper awards of ACL from 2019 to 2022 and record the 'title', 'year', 'author list' and 'PDF link' into this Google Sheet: {SHEET_URL}. Separate authors only by commas, use offical aclanthology urls not arxiv, and sort rows by years in descending orders.",
+  "instruction": "I am an NLP researcher. Check out the best long paper awards of ACL from 2019 to 2022 and record the 'title', 'year', 'author list' and 'PDF link' into this Google Sheet: {SHEET_URL}. Separate authors only by commas, use offical aclanthology urls not arxiv, and sort rows by years in descending orders. The sheet already has headers in row 1 — do not modify them.",
   "source": "authors",
   "config": [
     {
